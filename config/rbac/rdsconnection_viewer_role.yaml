@@ -1,0 +1,20 @@
+# permissions for end users to view rdsconnections.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rdsconnection-viewer-role
+rules:
+- apiGroups:
+  - dbaas.redhat.com
+  resources:
+  - rdsconnections
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - dbaas.redhat.com
+  resources:
+  - rdsconnections/status
+  verbs:
+  - get

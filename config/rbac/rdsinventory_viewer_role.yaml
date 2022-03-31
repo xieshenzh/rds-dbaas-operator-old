@@ -1,0 +1,20 @@
+# permissions for end users to view rdsinventories.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rdsinventory-viewer-role
+rules:
+- apiGroups:
+  - dbaas.redhat.com
+  resources:
+  - rdsinventories
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - dbaas.redhat.com
+  resources:
+  - rdsinventories/status
+  verbs:
+  - get

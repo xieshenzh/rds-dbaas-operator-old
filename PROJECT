@@ -1,0 +1,37 @@
+domain: redhat.com
+layout:
+- go.kubebuilder.io/v3
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}
+projectName: rds-dbaas-operator
+repo: github.com/xieshenzh/rds-dbaas-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: redhat.com
+  group: dbaas
+  kind: RDSInventory
+  path: github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: redhat.com
+  group: dbaas
+  kind: RDSConnection
+  path: github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: redhat.com
+  group: dbaas
+  kind: RDSInstance
+  path: github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1
+  version: v1alpha1
+version: "3"

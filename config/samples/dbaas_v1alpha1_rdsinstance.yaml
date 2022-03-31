@@ -1,0 +1,6 @@
+apiVersion: dbaas.redhat.com/v1alpha1
+kind: RDSInstance
+metadata:
+  name: rdsinstance-sample
+spec:
+  # TODO(user): Add fields here
