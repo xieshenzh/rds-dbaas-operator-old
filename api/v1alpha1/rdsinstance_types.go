@@ -17,26 +17,9 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// RDSInstanceSpec defines the desired state of RDSInstance
-type RDSInstanceSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of RDSInstance. Edit rdsinstance_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
-}
-
-// RDSInstanceStatus defines the observed state of RDSInstance
-type RDSInstanceStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-}
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
@@ -46,8 +29,8 @@ type RDSInstance struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   RDSInstanceSpec   `json:"spec,omitempty"`
-	Status RDSInstanceStatus `json:"status,omitempty"`
+	Spec   v1alpha1.DBaaSInstanceSpec   `json:"spec,omitempty"`
+	Status v1alpha1.DBaaSInstanceStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
