@@ -22,8 +22,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
 	dbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
 
@@ -36,13 +40,11 @@ type RDSInventoryReconciler struct {
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories/finalizers,verbs=update
+//+kubebuilder:rbac:groups=rds.services.k8s.aws,resources=dbinstances,verbs=get;list;watch
+//+kubebuilder:rbac:groups=services.k8s.aws,resources=adoptedresources,verbs=get;list;create
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the RDSInventory object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
@@ -58,5 +60,11 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbaasv1alpha1.RDSInventory{}).
+		Watches(
+			&source.Kind{Type: &rdsv1alpha1.DBInstance{}},
+			handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
+				return []reconcile.Request{} //TODO
+			}),
+		).
 		Complete(r)
 }

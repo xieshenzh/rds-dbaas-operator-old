@@ -19,17 +19,15 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/runtime"
 	"os"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"time"
 
-	dbaasoperator "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 	v1 "k8s.io/api/apps/v1"
 	rbac "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	label "k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
@@ -38,7 +36,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	dbaasoperator "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 )
 
 const (
