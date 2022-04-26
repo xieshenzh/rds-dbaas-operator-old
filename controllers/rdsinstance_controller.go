@@ -21,18 +21,41 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
-	opHandler "github.com/operator-framework/operator-lib/handler"
+	ophandler "github.com/operator-framework/operator-lib/handler"
 	dbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
+)
+
+const (
+	instanceFinalizer = "rds.dbaas.redhat.com/instance"
+
+	instanceConditionReady = "ProvisionReady"
+
+	statusReasonError   = "Error"
+	statusReasonUnknown = "Unknown"
+
+	statusMessageUpdateError = "Failed to update Instance"
+	statusMessageUpdating    = "Updating Instance"
+
+	phasePending  = "Pending"
+	phaseCreating = "Creating"
+	phaseUpdating = "Updating"
+	phaseDeleting = "Deleting"
+	phaseDeleted  = "Deleted"
+	phaseReady    = "Ready"
 )
 
 // RDSInstanceReconciler reconciles a RDSInstance object
@@ -51,23 +74,164 @@ type RDSInstanceReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
-func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
+	result = ctrl.Result{}
 
 	var instance dbaasv1alpha1.RDSInstance
-	if err := r.Get(ctx, req.NamespacedName, &instance); err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("RDS Instance resource not found, has been deleted")
-			return ctrl.Result{}, nil
-		}
-		logger.Error(err, "Error fetching RDS Instance for reconcile")
 
-		return ctrl.Result{}, err
+	var provisionStatus, provisionStatusReason, provisionStatusMessage string
+
+	returnRequeue := func() {
+		result = ctrl.Result{Requeue: true}
+		err = nil
+		provisionStatus = string(metav1.ConditionUnknown)
+		provisionStatusReason = statusReasonUnknown
+		provisionStatusMessage = statusMessageUpdating
 	}
 
-	opHandler.SetOwnerAnnotations(&instance, nil)
+	returnError := func(message string) {
+		provisionStatus = string(metav1.ConditionFalse)
+		provisionStatusReason = statusReasonError
+		provisionStatusMessage = message
+	}
 
-	return ctrl.Result{}, nil
+	returnUnknown := func(message string) {
+		provisionStatus = string(metav1.ConditionFalse)
+		provisionStatusReason = statusReasonUnknown
+		provisionStatusMessage = message
+	}
+
+	returnReady := func() {
+		provisionStatus = string(metav1.ConditionTrue)
+	}
+
+	updateInstanceReadyCondition := func() {
+		condition := metav1.Condition{
+			Type:    instanceConditionReady,
+			Status:  metav1.ConditionStatus(provisionStatus),
+			Reason:  provisionStatusReason,
+			Message: provisionStatusMessage,
+		}
+		apimeta.SetStatusCondition(&instance.Status.Conditions, condition)
+		if e := r.Status().Update(ctx, &instance); e != nil {
+			if apierrors.IsConflict(e) {
+				logger.Info("Instance modified, retry reconciling")
+				result = ctrl.Result{Requeue: true}
+			} else {
+				logger.Error(e, "Failed to update Instance status")
+				if err == nil {
+					err = e
+				}
+			}
+		}
+	}
+
+	checkFinalizer := func() bool {
+		if instance.ObjectMeta.DeletionTimestamp.IsZero() {
+			if !controllerutil.ContainsFinalizer(&instance, instanceFinalizer) {
+				instance.Status.Phase = phasePending
+				if err = r.Status().Update(ctx, &instance); err != nil {
+					if apierrors.IsConflict(err) {
+						logger.Info("Instance modified, retry reconciling")
+						returnRequeue()
+						return true
+					}
+					logger.Error(err, "Failed to update Instance phase in status")
+					returnError(statusMessageUpdateError)
+					return true
+				}
+
+				controllerutil.AddFinalizer(&instance, instanceFinalizer)
+				if err = r.Update(ctx, &instance); err != nil {
+					if apierrors.IsConflict(err) {
+						logger.Info("Instance modified, retry reconciling")
+						returnRequeue()
+						return true
+					}
+					logger.Error(err, "Failed to add finalizer to Instance")
+					returnError(statusMessageUpdateError)
+					return true
+				}
+				logger.Info("Finalizer added to Instance")
+				returnUnknown(statusMessageUpdating)
+				return true
+			}
+		} else {
+			if controllerutil.ContainsFinalizer(&instance, instanceFinalizer) {
+				//TODO delete rds db instance
+
+				instance.Status.Phase = phaseDeleted
+				if err := r.Status().Update(ctx, &instance); err != nil {
+					if apierrors.IsConflict(err) {
+						logger.Info("Instance modified, retry reconciling")
+						returnRequeue()
+						return true
+					}
+					logger.Error(err, "Failed to update Instance phase in status")
+					returnError(statusMessageUpdateError)
+					return true
+				}
+
+				controllerutil.RemoveFinalizer(&instance, instanceFinalizer)
+				if err := r.Update(ctx, &instance); err != nil {
+					if apierrors.IsConflict(err) {
+						logger.Info("Instance modified, retry reconciling")
+						returnRequeue()
+						return true
+					}
+					logger.Error(err, "Failed to remove finalizer from Instance")
+					returnError(statusMessageUpdateError)
+					return true
+				}
+				returnUnknown(statusMessageUpdating)
+				return true
+			}
+
+			// Stop reconciliation as the item is being deleted
+			returnUnknown(statusMessageUpdating)
+			return true
+		}
+
+		return false
+	}
+
+	createOrUpdateDBInstance := func() bool {
+		//TODO create rds db instance
+		ophandler.SetOwnerAnnotations(&instance, nil)
+		return false
+	}
+
+	syncDBInstanceStatus := func() bool {
+		//TODO sync rds db instance status
+		return false
+	}
+
+	if err = r.Get(ctx, req.NamespacedName, &instance); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("RDS Instance resource not found, has been deleted")
+			return
+		}
+		logger.Error(err, "Error fetching RDS Instance for reconcile")
+		return
+	}
+
+	defer updateInstanceReadyCondition()
+
+	if checkFinalizer() {
+		return
+	}
+
+	if createOrUpdateDBInstance() {
+		return
+	}
+
+	if syncDBInstanceStatus() {
+		return
+	}
+
+	returnReady()
+	return
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -85,12 +249,8 @@ func (r *RDSInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // Code from operator-lib: https://github.com/operator-framework/operator-lib/blob/d389ad4d93a46dba047b11161b755141fc853098/handler/enqueue_annotation.go#L121
 func getAnnotationRequests(object client.Object) reconcile.Request {
-	if len(object.GetAnnotations()) == 0 {
-		return reconcile.Request{}
-	}
-
-	if typeString, ok := object.GetAnnotations()[opHandler.TypeAnnotation]; ok && typeString == "RDSInstance.dbaas.redhat.com" {
-		namespacedNameString, ok := object.GetAnnotations()[opHandler.NamespacedNameAnnotation]
+	if typeString, ok := object.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == "RDSInstance.dbaas.redhat.com" {
+		namespacedNameString, ok := object.GetAnnotations()[ophandler.NamespacedNameAnnotation]
 		if !ok || strings.TrimSpace(namespacedNameString) == "" {
 			return reconcile.Request{}
 		}
