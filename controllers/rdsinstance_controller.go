@@ -18,10 +18,12 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
+	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
 	ophandler "github.com/operator-framework/operator-lib/handler"
 	dbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
@@ -44,11 +47,17 @@ const (
 
 	instanceConditionReady = "ProvisionReady"
 
-	statusReasonError   = "Error"
-	statusReasonUnknown = "Unknown"
+	statusReasonUpdating       = "Updating"
+	statusReasonDeleting       = "Deleting"
+	statusReasonInstanceError  = "Instance Error"
+	statusReasonInventoryError = "Inventory error"
 
-	statusMessageUpdateError = "Failed to update Instance"
-	statusMessageUpdating    = "Updating Instance"
+	statusMessageUpdateError         = "Failed to update Instance"
+	statusMessageUpdating            = "Updating Instance"
+	statusMessageDeleting            = "Deleting Instance"
+	statusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
+	statusMessageInventoryNotFound   = "Inventory not Found"
+	statusMessageGetInventoryError   = "Failed to get Inventory"
 
 	phasePending  = "Pending"
 	phaseCreating = "Creating"
@@ -56,6 +65,9 @@ const (
 	phaseDeleting = "Deleting"
 	phaseDeleted  = "Deleted"
 	phaseReady    = "Ready"
+
+	requiredParameterErrorTemplate = "required parameter %s is missing"
+	invalidParameterErrorTemplate  = "value of parameter %s is invalid"
 )
 
 // RDSInstanceReconciler reconciles a RDSInstance object
@@ -76,29 +88,37 @@ type RDSInstanceReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
 func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
-	result = ctrl.Result{}
 
+	var inventory dbaasv1alpha1.RDSInventory
 	var instance dbaasv1alpha1.RDSInstance
 
-	var provisionStatus, provisionStatusReason, provisionStatusMessage string
+	var provisionStatus, provisionStatusReason, provisionStatusMessage, phase string
 
 	returnRequeue := func() {
 		result = ctrl.Result{Requeue: true}
 		err = nil
 		provisionStatus = string(metav1.ConditionUnknown)
-		provisionStatusReason = statusReasonUnknown
+		provisionStatusReason = statusReasonUpdating
 		provisionStatusMessage = statusMessageUpdating
 	}
 
-	returnError := func(message string) {
+	returnError := func(e error, reason, message string) {
+		result = ctrl.Result{}
+		err = e
 		provisionStatus = string(metav1.ConditionFalse)
-		provisionStatusReason = statusReasonError
-		provisionStatusMessage = message
+		provisionStatusReason = reason
+		if len(provisionStatusMessage) > 0 {
+			provisionStatusMessage = fmt.Sprintf("%s: %s", message, provisionStatusMessage)
+		} else {
+			provisionStatusMessage = message
+		}
 	}
 
-	returnUnknown := func(message string) {
+	returnNotReady := func(reason, message string) {
+		result = ctrl.Result{}
+		err = nil
 		provisionStatus = string(metav1.ConditionFalse)
-		provisionStatusReason = statusReasonUnknown
+		provisionStatusReason = reason
 		provisionStatusMessage = message
 	}
 
@@ -114,8 +134,11 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Message: provisionStatusMessage,
 		}
 		apimeta.SetStatusCondition(&instance.Status.Conditions, condition)
+		if len(phase) > 0 {
+			instance.Status.Phase = phase
+		}
 		if e := r.Status().Update(ctx, &instance); e != nil {
-			if apierrors.IsConflict(e) {
+			if errors.IsConflict(e) {
 				logger.Info("Instance modified, retry reconciling")
 				result = ctrl.Result{Requeue: true}
 			} else {
@@ -130,66 +153,45 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	checkFinalizer := func() bool {
 		if instance.ObjectMeta.DeletionTimestamp.IsZero() {
 			if !controllerutil.ContainsFinalizer(&instance, instanceFinalizer) {
-				instance.Status.Phase = phasePending
-				if err = r.Status().Update(ctx, &instance); err != nil {
-					if apierrors.IsConflict(err) {
-						logger.Info("Instance modified, retry reconciling")
-						returnRequeue()
-						return true
-					}
-					logger.Error(err, "Failed to update Instance phase in status")
-					returnError(statusMessageUpdateError)
-					return true
-				}
-
+				phase = phasePending
 				controllerutil.AddFinalizer(&instance, instanceFinalizer)
-				if err = r.Update(ctx, &instance); err != nil {
-					if apierrors.IsConflict(err) {
+				if e := r.Update(ctx, &instance); e != nil {
+					if errors.IsConflict(e) {
 						logger.Info("Instance modified, retry reconciling")
 						returnRequeue()
 						return true
 					}
-					logger.Error(err, "Failed to add finalizer to Instance")
-					returnError(statusMessageUpdateError)
+					logger.Error(e, "Failed to add finalizer to Instance")
+					returnError(e, statusReasonInstanceError, statusMessageUpdateError)
 					return true
 				}
 				logger.Info("Finalizer added to Instance")
-				returnUnknown(statusMessageUpdating)
+				returnNotReady(statusReasonUpdating, statusMessageUpdating)
 				return true
 			}
 		} else {
 			if controllerutil.ContainsFinalizer(&instance, instanceFinalizer) {
+				phase = phaseDeleting
 				//TODO delete rds db instance
 
-				instance.Status.Phase = phaseDeleted
-				if err := r.Status().Update(ctx, &instance); err != nil {
-					if apierrors.IsConflict(err) {
-						logger.Info("Instance modified, retry reconciling")
-						returnRequeue()
-						return true
-					}
-					logger.Error(err, "Failed to update Instance phase in status")
-					returnError(statusMessageUpdateError)
-					return true
-				}
-
 				controllerutil.RemoveFinalizer(&instance, instanceFinalizer)
-				if err := r.Update(ctx, &instance); err != nil {
-					if apierrors.IsConflict(err) {
+				if e := r.Update(ctx, &instance); e != nil {
+					if errors.IsConflict(e) {
 						logger.Info("Instance modified, retry reconciling")
 						returnRequeue()
 						return true
 					}
-					logger.Error(err, "Failed to remove finalizer from Instance")
-					returnError(statusMessageUpdateError)
+					logger.Error(e, "Failed to remove finalizer from Instance")
+					returnError(e, statusReasonInstanceError, statusMessageUpdateError)
 					return true
 				}
-				returnUnknown(statusMessageUpdating)
+				phase = phaseDeleted
+				returnNotReady(statusReasonUpdating, statusMessageUpdating)
 				return true
 			}
 
 			// Stop reconciliation as the item is being deleted
-			returnUnknown(statusMessageUpdating)
+			returnNotReady(statusReasonDeleting, statusMessageDeleting)
 			return true
 		}
 
@@ -197,8 +199,35 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	createOrUpdateDBInstance := func() bool {
-		//TODO create rds db instance
-		ophandler.SetOwnerAnnotations(&instance, nil)
+		dbInstance := &rdsv1alpha1.DBInstance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      instance.Name,
+				Namespace: inventory.Namespace,
+			},
+		}
+
+		if r, e := controllerutil.CreateOrUpdate(ctx, r.Client, dbInstance, func() error {
+			if e := ophandler.SetOwnerAnnotations(&instance, dbInstance); e != nil {
+				logger.Error(e, "Failed to set owner for DBInstance")
+				returnError(e, statusReasonInstanceError, e.Error())
+				return e
+			}
+			if e := r.setDBInstanceSpec(ctx, dbInstance, &instance); e != nil {
+				logger.Error(e, "Failed to set spec for DBInstance")
+				returnError(e, statusReasonInstanceError, e.Error())
+				return e
+			}
+			return nil
+		}); e != nil {
+			logger.Error(e, "Failed to create or update the DBInstance")
+			returnError(e, statusReasonInstanceError, statusMessageCreateOrUpdateError)
+			return true
+		} else if r == controllerutil.OperationResultCreated {
+			phase = phaseCreating
+		} else if r == controllerutil.OperationResultUpdated {
+			phase = phaseUpdating
+		}
+
 		return false
 	}
 
@@ -218,6 +247,16 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	defer updateInstanceReadyCondition()
 
+	if e := r.Get(ctx, client.ObjectKey{Namespace: instance.Spec.InventoryRef.Namespace, Name: instance.Spec.InventoryRef.Name}, &inventory); e != nil {
+		if errors.IsNotFound(e) {
+			logger.Info("RDSInventory resource not found, may have been deleted")
+			returnNotReady(statusReasonInventoryError, statusMessageInventoryNotFound)
+			return
+		}
+		returnError(e, statusReasonInventoryError, statusMessageGetInventoryError)
+		return
+	}
+
 	if checkFinalizer() {
 		return
 	}
@@ -232,6 +271,129 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	returnReady()
 	return
+}
+
+func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstance *rdsv1alpha1.DBInstance, rdsInstance *dbaasv1alpha1.RDSInstance) error {
+	if engine, ok := rdsInstance.Spec.OtherInstanceParams["Engine"]; ok {
+		dbInstance.Spec.Engine = &engine
+	} else {
+		return fmt.Errorf(requiredParameterErrorTemplate, "Engine")
+	}
+
+	if engineVersion, ok := rdsInstance.Spec.OtherInstanceParams["EngineVersion"]; ok {
+		dbInstance.Spec.EngineVersion = &engineVersion
+	}
+
+	if dbInstanceId, ok := rdsInstance.Spec.OtherInstanceParams["DBInstanceIdentifier"]; ok {
+		dbInstance.Spec.DBInstanceIdentifier = &dbInstanceId
+	} else {
+		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceIdentifier")
+
+	}
+
+	if masterUsername, ok := rdsInstance.Spec.OtherInstanceParams["MasterUsername"]; ok {
+		dbInstance.Spec.MasterUsername = &masterUsername
+	} else {
+		return fmt.Errorf(requiredParameterErrorTemplate, "MasterUsername")
+	}
+
+	if masterUserPasswordSecret, ok := rdsInstance.Spec.OtherInstanceParams["MasterUserPasswordSecret"]; ok {
+		if masterUserPasswordKey, ok := rdsInstance.Spec.OtherInstanceParams["MasterUserPasswordKey"]; ok {
+			secret := &v1.Secret{}
+			if e := r.Get(ctx, client.ObjectKey{Namespace: rdsInstance.Namespace, Name: masterUserPasswordSecret}, secret); e != nil {
+				return fmt.Errorf(invalidParameterErrorTemplate, "MasterUserPasswordSecret")
+			}
+			if _, ok := secret.Data[masterUserPasswordKey]; ok {
+				dbInstance.Spec.MasterUserPassword = &ackv1alpha1.SecretKeyReference{
+					SecretReference: v1.SecretReference{
+						Name:      masterUserPasswordSecret,
+						Namespace: rdsInstance.Namespace,
+					},
+					Key: masterUserPasswordKey,
+				}
+			} else {
+				return fmt.Errorf(invalidParameterErrorTemplate, "MasterUserPasswordKey")
+			}
+		} else {
+			return fmt.Errorf(requiredParameterErrorTemplate, "MasterUserPasswordKey")
+		}
+	} else {
+		return fmt.Errorf(requiredParameterErrorTemplate, "MasterUserPasswordSecret")
+	}
+
+	if dbInstanceClass, ok := rdsInstance.Spec.OtherInstanceParams["DBInstanceClass"]; ok {
+		dbInstance.Spec.DBInstanceClass = &dbInstanceClass
+	} else {
+		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceClass")
+	}
+
+	if storageType, ok := rdsInstance.Spec.OtherInstanceParams["StorageType"]; ok {
+		dbInstance.Spec.StorageType = &storageType
+	}
+
+	if allocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams["AllocatedStorage"]; ok {
+		if i, e := strconv.ParseInt(allocatedStorage, 10, 64); e != nil {
+			return fmt.Errorf(invalidParameterErrorTemplate, "AllocatedStorage")
+		} else {
+			dbInstance.Spec.AllocatedStorage = &i
+		}
+	} else {
+		return fmt.Errorf(requiredParameterErrorTemplate, "AllocatedStorage")
+	}
+
+	if iops, ok := rdsInstance.Spec.OtherInstanceParams["IOPS"]; ok {
+		if i, e := strconv.ParseInt(iops, 10, 64); e != nil {
+			return fmt.Errorf(invalidParameterErrorTemplate, "IOPS")
+		} else {
+			dbInstance.Spec.IOPS = &i
+		}
+	}
+
+	if maxAllocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams["MaxAllocatedStorage"]; ok {
+		if i, e := strconv.ParseInt(maxAllocatedStorage, 10, 64); e != nil {
+			return fmt.Errorf(invalidParameterErrorTemplate, "MaxAllocatedStorage")
+		} else {
+			dbInstance.Spec.MaxAllocatedStorage = &i
+		}
+	}
+
+	if dbSubnetGroupName, ok := rdsInstance.Spec.OtherInstanceParams["DBSubnetGroupName"]; ok {
+		dbInstance.Spec.DBSubnetGroupName = &dbSubnetGroupName
+	}
+
+	if publiclyAccessible, ok := rdsInstance.Spec.OtherInstanceParams["PubliclyAccessible"]; ok {
+		if b, e := strconv.ParseBool(publiclyAccessible); e != nil {
+			return fmt.Errorf(invalidParameterErrorTemplate, "PubliclyAccessible")
+		} else {
+			dbInstance.Spec.PubliclyAccessible = &b
+		}
+	}
+
+	if vpcSecurityGroupIDs, ok := rdsInstance.Spec.OtherInstanceParams["VPCSecurityGroupIDs"]; ok {
+		sl := strings.Split(vpcSecurityGroupIDs, ",")
+		var sgs []*string
+		for _, s := range sl {
+			st := s
+			sgs = append(sgs, &st)
+		}
+		dbInstance.Spec.VPCSecurityGroupIDs = sgs
+	}
+
+	dbInstance.Spec.AvailabilityZone = &rdsInstance.Spec.CloudRegion
+
+	if dbName, ok := rdsInstance.Spec.OtherInstanceParams["DBName"]; ok {
+		dbInstance.Spec.DBName = &dbName
+	}
+
+	if port, ok := rdsInstance.Spec.OtherInstanceParams["Port"]; ok {
+		if i, e := strconv.ParseInt(port, 10, 64); e != nil {
+			return fmt.Errorf(invalidParameterErrorTemplate, "Port")
+		} else {
+			dbInstance.Spec.Port = &i
+		}
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

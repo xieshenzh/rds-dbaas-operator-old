@@ -192,7 +192,104 @@ func bridgeProviderCR(clusterRoleList *rbac.ClusterRoleList) *dbaasoperator.DBaa
 			AllowsFreeTrial:              true,
 			ExternalProvisionURL:         provisionDocURL,
 			ExternalProvisionDescription: provisionDescription,
-			InstanceParameterSpecs:       []dbaasoperator.InstanceParameterSpec{}, //TODO
+			InstanceParameterSpecs: []dbaasoperator.InstanceParameterSpec{
+				{
+					Name:        "Engine",
+					DisplayName: "Engine Type",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Name:        "EngineVersion",
+					DisplayName: "Engine Version",
+					Type:        "string",
+					Required:    false,
+				},
+				{
+					Name:        "DBInstanceIdentifier",
+					DisplayName: "DB instance identifier",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Name:        "MasterUsername",
+					DisplayName: "Master username",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Name:        "MasterUserPasswordSecret",
+					DisplayName: "Secret of master password",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Name:        "MasterUserPasswordKey",
+					DisplayName: "Secret key of master password",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Name:        "DBInstanceClass",
+					DisplayName: "DB instance class",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Name:        "StorageType",
+					DisplayName: "Storage type",
+					Type:        "string",
+					Required:    false,
+				},
+				{
+					Name:        "AllocatedStorage",
+					DisplayName: "Allocated storage",
+					Type:        "int",
+					Required:    true,
+				},
+				{
+					Name:        "IOPS",
+					DisplayName: "Provisioned IOPS",
+					Type:        "int",
+					Required:    false,
+				},
+				{
+					Name:        "MaxAllocatedStorage",
+					DisplayName: "Maximum storage threshold",
+					Type:        "int",
+					Required:    false,
+				},
+				{
+					Name:        "DBSubnetGroupName",
+					DisplayName: "Subnet group",
+					Type:        "string",
+					Required:    false,
+				},
+				{
+					Name:        "PubliclyAccessible",
+					DisplayName: "Public access",
+					Type:        "bool",
+					Required:    false,
+				},
+				{
+					Name:        "VPCSecurityGroupIDs",
+					DisplayName: "VPC security groups",
+					Type:        "string",
+					Required:    false,
+				},
+				{
+					Name:        "DBName",
+					DisplayName: "Initial database name",
+					Type:        "string",
+					Required:    false,
+				},
+				{
+					Name:        "Port",
+					DisplayName: "Database port",
+					Type:        "int",
+					Required:    false,
+				},
+			},
 		},
 	}
 	return instance
