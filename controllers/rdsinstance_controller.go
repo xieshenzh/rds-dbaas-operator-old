@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -36,10 +37,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	dbaasv1alpha1 "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
 	ophandler "github.com/operator-framework/operator-lib/handler"
-	dbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
+	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
 
 const (
@@ -58,6 +60,7 @@ const (
 	statusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
 	statusMessageInventoryNotFound   = "Inventory not Found"
 	statusMessageGetInventoryError   = "Failed to get Inventory"
+	statusMessageGetInstanceError    = "Failed to get DB Instance"
 
 	phasePending  = "Pending"
 	phaseCreating = "Creating"
@@ -65,6 +68,9 @@ const (
 	phaseDeleting = "Deleting"
 	phaseDeleted  = "Deleted"
 	phaseReady    = "Ready"
+	phaseError    = "Error"
+	phaseFailed   = "Failed"
+	phaseUnknown  = "Unknown"
 
 	requiredParameterErrorTemplate = "required parameter %s is missing"
 	invalidParameterErrorTemplate  = "value of parameter %s is invalid"
@@ -89,8 +95,8 @@ type RDSInstanceReconciler struct {
 func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
 
-	var inventory dbaasv1alpha1.RDSInventory
-	var instance dbaasv1alpha1.RDSInstance
+	var inventory rdsdbaasv1alpha1.RDSInventory
+	var instance rdsdbaasv1alpha1.RDSInstance
 
 	var provisionStatus, provisionStatusReason, provisionStatusMessage, phase string
 
@@ -232,7 +238,15 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	syncDBInstanceStatus := func() bool {
-		//TODO sync rds db instance status
+		dbInstance := &rdsv1alpha1.DBInstance{}
+		if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
+			returnError(e, statusReasonInstanceError, statusMessageGetInstanceError)
+			return true
+		}
+
+		instance.Status.InstanceID = *dbInstance.Spec.DBInstanceIdentifier
+		setDBInstancePhase(dbInstance, &instance)
+		setDBInstanceStatus(dbInstance, &instance)
 		return false
 	}
 
@@ -273,7 +287,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return
 }
 
-func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstance *rdsv1alpha1.DBInstance, rdsInstance *dbaasv1alpha1.RDSInstance) error {
+func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) error {
 	if engine, ok := rdsInstance.Spec.OtherInstanceParams["Engine"]; ok {
 		dbInstance.Spec.Engine = &engine
 	} else {
@@ -288,37 +302,6 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		dbInstance.Spec.DBInstanceIdentifier = &dbInstanceId
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceIdentifier")
-
-	}
-
-	if masterUsername, ok := rdsInstance.Spec.OtherInstanceParams["MasterUsername"]; ok {
-		dbInstance.Spec.MasterUsername = &masterUsername
-	} else {
-		return fmt.Errorf(requiredParameterErrorTemplate, "MasterUsername")
-	}
-
-	if masterUserPasswordSecret, ok := rdsInstance.Spec.OtherInstanceParams["MasterUserPasswordSecret"]; ok {
-		if masterUserPasswordKey, ok := rdsInstance.Spec.OtherInstanceParams["MasterUserPasswordKey"]; ok {
-			secret := &v1.Secret{}
-			if e := r.Get(ctx, client.ObjectKey{Namespace: rdsInstance.Namespace, Name: masterUserPasswordSecret}, secret); e != nil {
-				return fmt.Errorf(invalidParameterErrorTemplate, "MasterUserPasswordSecret")
-			}
-			if _, ok := secret.Data[masterUserPasswordKey]; ok {
-				dbInstance.Spec.MasterUserPassword = &ackv1alpha1.SecretKeyReference{
-					SecretReference: v1.SecretReference{
-						Name:      masterUserPasswordSecret,
-						Namespace: rdsInstance.Namespace,
-					},
-					Key: masterUserPasswordKey,
-				}
-			} else {
-				return fmt.Errorf(invalidParameterErrorTemplate, "MasterUserPasswordKey")
-			}
-		} else {
-			return fmt.Errorf(requiredParameterErrorTemplate, "MasterUserPasswordKey")
-		}
-	} else {
-		return fmt.Errorf(requiredParameterErrorTemplate, "MasterUserPasswordSecret")
 	}
 
 	if dbInstanceClass, ok := rdsInstance.Spec.OtherInstanceParams["DBInstanceClass"]; ok {
@@ -379,27 +362,121 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		dbInstance.Spec.VPCSecurityGroupIDs = sgs
 	}
 
-	dbInstance.Spec.AvailabilityZone = &rdsInstance.Spec.CloudRegion
-
-	if dbName, ok := rdsInstance.Spec.OtherInstanceParams["DBName"]; ok {
-		dbInstance.Spec.DBName = &dbName
+	if e := r.setCredentials(ctx, dbInstance, rdsInstance); e != nil {
+		return fmt.Errorf("failed to set credentials for the DB instance")
 	}
 
-	if port, ok := rdsInstance.Spec.OtherInstanceParams["Port"]; ok {
-		if i, e := strconv.ParseInt(port, 10, 64); e != nil {
-			return fmt.Errorf(invalidParameterErrorTemplate, "Port")
-		} else {
-			dbInstance.Spec.Port = &i
+	dbInstance.Spec.AvailabilityZone = &rdsInstance.Spec.CloudRegion
+
+	return nil
+}
+
+func (r *RDSInstanceReconciler) setCredentials(ctx context.Context, dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) error {
+	logger := log.FromContext(ctx)
+
+	secretName := fmt.Sprintf("%s-credentials", rdsInstance.Name)
+	secret := &v1.Secret{}
+	if e := r.Get(ctx, client.ObjectKey{Namespace: rdsInstance.Namespace, Name: secretName}, secret); e != nil {
+		if errors.IsNotFound(e) {
+			secret.Name = secretName
+			secret.Namespace = rdsInstance.Namespace
+			secret.ObjectMeta.Labels = createSecretLabels(rdsInstance)
+			if e := ctrl.SetControllerReference(rdsInstance, secret, r.Scheme); e != nil {
+				logger.Error(e, "Failed to set owner reference for the credential secret")
+				return e
+			}
+			secret.Data["username"] = []byte(generateUsername(*dbInstance.Spec.Engine))
+			secret.Data["password"] = []byte(generatePassword())
+			if e := r.Create(ctx, secret); e != nil {
+				logger.Error(e, "Failed to create the credential secret")
+				return e
+			}
 		}
+		logger.Error(e, "Failed to retrieve the credential secret")
+		return e
+	}
+
+	var username string
+	u, nok := secret.Data["username"]
+	if !nok {
+		username = generateUsername(*dbInstance.Spec.Engine)
+		secret.Data["username"] = []byte(username)
+	} else {
+		var du []byte
+		if _, e := base64.StdEncoding.Decode(du, u); e != nil {
+			logger.Error(e, "Failed to decode the username in the credential secret")
+			return e
+		}
+		username = string(du)
+	}
+
+	_, pok := secret.Data["password"]
+	if !pok {
+		secret.Data["password"] = []byte(generatePassword())
+	}
+
+	if !nok || !pok {
+		if e := r.Update(ctx, secret); e != nil {
+			logger.Error(e, "Failed to update the credential secret")
+			return e
+		}
+	}
+
+	dbInstance.Spec.MasterUsername = &username
+
+	dbInstance.Spec.MasterUserPassword = &ackv1alpha1.SecretKeyReference{
+		SecretReference: v1.SecretReference{
+			Name:      secretName,
+			Namespace: rdsInstance.Namespace,
+		},
+		Key: "password",
 	}
 
 	return nil
 }
 
+func createSecretLabels(rdsInstance *rdsdbaasv1alpha1.RDSInstance) map[string]string {
+	return map[string]string{
+		"managed-by":               "rds-dbaas-operator",
+		"owner":                    rdsInstance.Name,
+		"owner.kind":               rdsInstance.Kind,
+		"owner.namespace":          rdsInstance.Namespace,
+		dbaasv1alpha1.TypeLabelKey: dbaasv1alpha1.TypeLabelValue,
+	}
+}
+
+func setDBInstancePhase(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) {
+	switch *dbInstance.Status.DBInstanceStatus {
+	case "available":
+		rdsInstance.Status.Phase = phaseReady
+	case "creating":
+		rdsInstance.Status.Phase = phaseCreating
+	case "deleting":
+		rdsInstance.Status.Phase = phaseDeleting
+	case "failed":
+		rdsInstance.Status.Phase = phaseFailed
+	case "inaccessible-encryption-credentials-recoverable", "incompatible-parameters", "restore-error":
+		rdsInstance.Status.Phase = phaseError
+	case "backing-up", "configuring-enhanced-monitoring", "configuring-iam-database-auth", "configuring-log-exports",
+		"converting-to-vpc", "maintenance", "modifying", "moving-to-vpc", "rebooting", "resetting-master-credentials",
+		"renaming", "starting", "stopping", "storage-optimization", "upgrading":
+		rdsInstance.Status.Phase = phaseUpdating
+	case "inaccessible-encryption-credentials", "incompatible-network", "incompatible-option-group", "incompatible-restore",
+		"insufficient-capacity", "stopped", "storage-full":
+		rdsInstance.Status.Phase = phaseUnknown
+	default:
+		rdsInstance.Status.Phase = phaseUnknown
+	}
+}
+
+func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) {
+
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RDSInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dbaasv1alpha1.RDSInstance{}).
+		For(&rdsdbaasv1alpha1.RDSInstance{}).
 		Watches(
 			&source.Kind{Type: &rdsv1alpha1.DBInstance{}},
 			handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
