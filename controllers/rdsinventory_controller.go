@@ -31,6 +31,10 @@ import (
 	dbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
 
+const (
+	inventoryConditionReady = "SpecSynced"
+)
+
 // RDSInventoryReconciler reconciles a RDSInventory object
 type RDSInventoryReconciler struct {
 	client.Client

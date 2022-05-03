@@ -51,14 +51,17 @@ const (
 
 	statusReasonUpdating       = "Updating"
 	statusReasonDeleting       = "Deleting"
-	statusReasonInstanceError  = "Instance Error"
+	statusReasonTerminated     = "Terminated"
+	statusReasonError          = "Error"
 	statusReasonInventoryError = "Inventory error"
 
 	statusMessageUpdateError         = "Failed to update Instance"
 	statusMessageUpdating            = "Updating Instance"
 	statusMessageDeleting            = "Deleting Instance"
+	statusMessageError               = "Instance with error"
 	statusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
 	statusMessageInventoryNotFound   = "Inventory not Found"
+	statusMessageInventoryNotReady   = "Inventory not ready"
 	statusMessageGetInventoryError   = "Failed to get Inventory"
 	statusMessageGetInstanceError    = "Failed to get DB Instance"
 
@@ -100,7 +103,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	var provisionStatus, provisionStatusReason, provisionStatusMessage, phase string
 
-	returnRequeue := func() {
+	returnUpdating := func() {
 		result = ctrl.Result{Requeue: true}
 		err = nil
 		provisionStatus = string(metav1.ConditionUnknown)
@@ -122,6 +125,14 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	returnNotReady := func(reason, message string) {
 		result = ctrl.Result{}
+		err = nil
+		provisionStatus = string(metav1.ConditionFalse)
+		provisionStatusReason = reason
+		provisionStatusMessage = message
+	}
+
+	returnRequeue := func(reason, message string) {
+		result = ctrl.Result{Requeue: true}
 		err = nil
 		provisionStatus = string(metav1.ConditionFalse)
 		provisionStatusReason = reason
@@ -164,11 +175,11 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				if e := r.Update(ctx, &instance); e != nil {
 					if errors.IsConflict(e) {
 						logger.Info("Instance modified, retry reconciling")
-						returnRequeue()
+						returnUpdating()
 						return true
 					}
 					logger.Error(e, "Failed to add finalizer to Instance")
-					returnError(e, statusReasonInstanceError, statusMessageUpdateError)
+					returnError(e, statusReasonError, statusMessageUpdateError)
 					return true
 				}
 				logger.Info("Finalizer added to Instance")
@@ -184,11 +195,11 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				if e := r.Update(ctx, &instance); e != nil {
 					if errors.IsConflict(e) {
 						logger.Info("Instance modified, retry reconciling")
-						returnRequeue()
+						returnUpdating()
 						return true
 					}
 					logger.Error(e, "Failed to remove finalizer from Instance")
-					returnError(e, statusReasonInstanceError, statusMessageUpdateError)
+					returnError(e, statusReasonError, statusMessageUpdateError)
 					return true
 				}
 				phase = phaseDeleted
@@ -215,18 +226,23 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if r, e := controllerutil.CreateOrUpdate(ctx, r.Client, dbInstance, func() error {
 			if e := ophandler.SetOwnerAnnotations(&instance, dbInstance); e != nil {
 				logger.Error(e, "Failed to set owner for DBInstance")
-				returnError(e, statusReasonInstanceError, e.Error())
+				returnError(e, statusReasonError, e.Error())
+				return e
+			}
+			if e := ctrl.SetControllerReference(&inventory, dbInstance, r.Scheme); e != nil {
+				logger.Error(e, "Failed to set owner reference for the DBInstance")
+				returnError(e, statusReasonError, e.Error())
 				return e
 			}
 			if e := r.setDBInstanceSpec(ctx, dbInstance, &instance); e != nil {
 				logger.Error(e, "Failed to set spec for DBInstance")
-				returnError(e, statusReasonInstanceError, e.Error())
+				returnError(e, statusReasonError, e.Error())
 				return e
 			}
 			return nil
 		}); e != nil {
 			logger.Error(e, "Failed to create or update the DBInstance")
-			returnError(e, statusReasonInstanceError, statusMessageCreateOrUpdateError)
+			returnError(e, statusReasonError, statusMessageCreateOrUpdateError)
 			return true
 		} else if r == controllerutil.OperationResultCreated {
 			phase = phaseCreating
@@ -241,22 +257,31 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		dbInstance := &rdsv1alpha1.DBInstance{}
 		if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
 			logger.Error(e, "Failed to get DBInstance status")
-			returnError(e, statusReasonInstanceError, statusMessageGetInstanceError)
+			returnError(e, statusReasonError, statusMessageGetInstanceError)
 			return true
 		}
 
 		instance.Status.InstanceID = *dbInstance.Spec.DBInstanceIdentifier
 		setDBInstancePhase(dbInstance, &instance)
 		setDBInstanceStatus(dbInstance, &instance)
+		for _, condition := range dbInstance.Status.Conditions {
+			apimeta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+				Type:               string(condition.Type),
+				Status:             metav1.ConditionStatus(condition.Status),
+				LastTransitionTime: metav1.Time{Time: condition.LastTransitionTime.Time},
+				Reason:             *condition.Reason,
+				Message:            *condition.Message,
+			})
+		}
 
 		if e := r.Status().Update(ctx, &instance); e != nil {
 			if errors.IsConflict(e) {
 				logger.Info("Instance modified, retry reconciling")
-				returnRequeue()
+				returnUpdating()
 				return true
 			}
 			logger.Error(e, "Failed to sync Instance status")
-			returnError(e, statusReasonInstanceError, statusMessageUpdateError)
+			returnError(e, statusReasonError, statusMessageUpdateError)
 			return true
 		}
 		return false
@@ -275,11 +300,17 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if e := r.Get(ctx, client.ObjectKey{Namespace: instance.Spec.InventoryRef.Namespace, Name: instance.Spec.InventoryRef.Name}, &inventory); e != nil {
 		if errors.IsNotFound(e) {
-			logger.Info("RDSInventory resource not found, may have been deleted")
-			returnNotReady(statusReasonInventoryError, statusMessageInventoryNotFound)
+			logger.Info("RDS Inventory resource not found, may have been deleted")
+			returnError(e, statusReasonInventoryError, statusMessageInventoryNotFound)
 			return
 		}
+		logger.Error(e, "Error fetching RDS Inventory for reconcile")
 		returnError(e, statusReasonInventoryError, statusMessageGetInventoryError)
+		return
+	}
+
+	if condition := apimeta.FindStatusCondition(inventory.Status.Conditions, inventoryConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
+		returnRequeue(statusReasonError, statusMessageInventoryNotReady)
 		return
 	}
 
@@ -295,11 +326,18 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return
 	}
 
-	if instance.Status.Phase == phaseReady {
+	switch instance.Status.Phase {
+	case phaseReady:
 		returnReady()
-	} else {
-		returnNotReady(instance.Status.Phase, "")
+	case phaseFailed, phaseDeleted:
+		returnNotReady(statusReasonTerminated, instance.Status.Phase)
+	case phasePending, phaseCreating, phaseUpdating, phaseDeleting:
+		returnUpdating()
+	case phaseError, phaseUnknown:
+		returnRequeue(statusReasonError, statusMessageError)
+	default:
 	}
+
 	return
 }
 
@@ -381,6 +419,9 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 	if e := r.setCredentials(ctx, dbInstance, rdsInstance); e != nil {
 		return fmt.Errorf("failed to set credentials for the DB instance")
 	}
+
+	dbName := generateDBName(*dbInstance.Spec.Engine)
+	dbInstance.Spec.DBName = &dbName
 
 	dbInstance.Spec.AvailabilityZone = &rdsInstance.Spec.CloudRegion
 
@@ -501,27 +542,27 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 		rdsInstance.Status.InstanceInfo["activityStreamEngineNativeAuditFieldsIncluded"] = strconv.FormatBool(*dbInstance.Status.ActivityStreamEngineNativeAuditFieldsIncluded)
 	}
 	if dbInstance.Status.ActivityStreamKinesisStreamName != nil {
-		rdsInstance.Status.InstanceInfo["activityStreamKinesisStreamName"] = string(*dbInstance.Status.ActivityStreamKinesisStreamName)
+		rdsInstance.Status.InstanceInfo["activityStreamKinesisStreamName"] = *dbInstance.Status.ActivityStreamKinesisStreamName
 	}
 	if dbInstance.Status.ActivityStreamKMSKeyID != nil {
-		rdsInstance.Status.InstanceInfo["activityStreamKMSKeyID"] = string(*dbInstance.Status.ActivityStreamKMSKeyID)
+		rdsInstance.Status.InstanceInfo["activityStreamKMSKeyID"] = *dbInstance.Status.ActivityStreamKMSKeyID
 	}
 	if dbInstance.Status.ActivityStreamMode != nil {
-		rdsInstance.Status.InstanceInfo["activityStreamMode"] = string(*dbInstance.Status.ActivityStreamMode)
+		rdsInstance.Status.InstanceInfo["activityStreamMode"] = *dbInstance.Status.ActivityStreamMode
 	}
 	if dbInstance.Status.ActivityStreamStatus != nil {
-		rdsInstance.Status.InstanceInfo["activityStreamStatus"] = string(*dbInstance.Status.ActivityStreamStatus)
+		rdsInstance.Status.InstanceInfo["activityStreamStatus"] = *dbInstance.Status.ActivityStreamStatus
 	}
 	if dbInstance.Status.AssociatedRoles != nil {
 		for i, r := range dbInstance.Status.AssociatedRoles {
 			if r.FeatureName != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("associatedRoles[%d].featureName", i)] = string(*r.FeatureName)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("associatedRoles[%d].featureName", i)] = *r.FeatureName
 			}
 			if r.RoleARN != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("associatedRoles[%d].roleARN", i)] = string(*r.RoleARN)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("associatedRoles[%d].roleARN", i)] = *r.RoleARN
 			}
 			if r.Status != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("associatedRoles[%d].status", i)] = string(*r.Status)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("associatedRoles[%d].status", i)] = *r.Status
 			}
 		}
 	}
@@ -529,13 +570,13 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 		rdsInstance.Status.InstanceInfo["automaticRestartTime"] = dbInstance.Status.AutomaticRestartTime.String()
 	}
 	if dbInstance.Status.AutomationMode != nil {
-		rdsInstance.Status.InstanceInfo["automationMode"] = string(*dbInstance.Status.AutomationMode)
+		rdsInstance.Status.InstanceInfo["automationMode"] = *dbInstance.Status.AutomationMode
 	}
 	if dbInstance.Status.AWSBackupRecoveryPointARN != nil {
-		rdsInstance.Status.InstanceInfo["awsBackupRecoveryPointARN"] = string(*dbInstance.Status.AWSBackupRecoveryPointARN)
+		rdsInstance.Status.InstanceInfo["awsBackupRecoveryPointARN"] = *dbInstance.Status.AWSBackupRecoveryPointARN
 	}
 	if dbInstance.Status.CACertificateIdentifier != nil {
-		rdsInstance.Status.InstanceInfo["caCertificateIdentifier"] = string(*dbInstance.Status.CACertificateIdentifier)
+		rdsInstance.Status.InstanceInfo["caCertificateIdentifier"] = *dbInstance.Status.CACertificateIdentifier
 	}
 	if dbInstance.Status.CustomerOwnedIPEnabled != nil {
 		rdsInstance.Status.InstanceInfo["customerOwnedIPEnabled"] = strconv.FormatBool(*dbInstance.Status.CustomerOwnedIPEnabled)
@@ -543,102 +584,102 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 	if dbInstance.Status.DBInstanceAutomatedBackupsReplications != nil {
 		for i, r := range dbInstance.Status.DBInstanceAutomatedBackupsReplications {
 			if r.DBInstanceAutomatedBackupsARN != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbInstanceAutomatedBackupsReplications[%d].dbInstanceAutomatedBackupsARN", i)] = string(*r.DBInstanceAutomatedBackupsARN)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbInstanceAutomatedBackupsReplications[%d].dbInstanceAutomatedBackupsARN", i)] = *r.DBInstanceAutomatedBackupsARN
 			}
 		}
 	}
 	if dbInstance.Status.DBInstanceStatus != nil {
-		rdsInstance.Status.InstanceInfo["dbInstanceStatus"] = string(*dbInstance.Status.DBInstanceStatus)
+		rdsInstance.Status.InstanceInfo["dbInstanceStatus"] = *dbInstance.Status.DBInstanceStatus
 	}
 	if dbInstance.Status.DBParameterGroups != nil {
 		for i, g := range dbInstance.Status.DBParameterGroups {
 			if g.DBParameterGroupName != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbParameterGroups[%d].dbParameterGroupName", i)] = string(*g.DBParameterGroupName)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbParameterGroups[%d].dbParameterGroupName", i)] = *g.DBParameterGroupName
 			}
 			if g.ParameterApplyStatus != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbParameterGroups[%d].parameterApplyStatus", i)] = string(*g.ParameterApplyStatus)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbParameterGroups[%d].parameterApplyStatus", i)] = *g.ParameterApplyStatus
 			}
 		}
 	}
 	if dbInstance.Status.DBSubnetGroup != nil {
 		if dbInstance.Status.DBSubnetGroup.DBSubnetGroupARN != nil {
-			rdsInstance.Status.InstanceInfo["dbSubnetGroup.dbSubnetGroupARN"] = string(*dbInstance.Status.DBSubnetGroup.DBSubnetGroupARN)
+			rdsInstance.Status.InstanceInfo["dbSubnetGroup.dbSubnetGroupARN"] = *dbInstance.Status.DBSubnetGroup.DBSubnetGroupARN
 		}
 		if dbInstance.Status.DBSubnetGroup.DBSubnetGroupDescription != nil {
-			rdsInstance.Status.InstanceInfo["dbSubnetGroup.dbSubnetGroupDescription"] = string(*dbInstance.Status.DBSubnetGroup.DBSubnetGroupDescription)
+			rdsInstance.Status.InstanceInfo["dbSubnetGroup.dbSubnetGroupDescription"] = *dbInstance.Status.DBSubnetGroup.DBSubnetGroupDescription
 		}
 		if dbInstance.Status.DBSubnetGroup.DBSubnetGroupName != nil {
-			rdsInstance.Status.InstanceInfo["dbSubnetGroup.dbSubnetGroupName"] = string(*dbInstance.Status.DBSubnetGroup.DBSubnetGroupName)
+			rdsInstance.Status.InstanceInfo["dbSubnetGroup.dbSubnetGroupName"] = *dbInstance.Status.DBSubnetGroup.DBSubnetGroupName
 		}
 		if dbInstance.Status.DBSubnetGroup.SubnetGroupStatus != nil {
-			rdsInstance.Status.InstanceInfo["dbSubnetGroup.subnetGroupStatus"] = string(*dbInstance.Status.DBSubnetGroup.SubnetGroupStatus)
+			rdsInstance.Status.InstanceInfo["dbSubnetGroup.subnetGroupStatus"] = *dbInstance.Status.DBSubnetGroup.SubnetGroupStatus
 		}
 		if dbInstance.Status.DBSubnetGroup.Subnets != nil {
 			for i, s := range dbInstance.Status.DBSubnetGroup.Subnets {
 				if s.SubnetAvailabilityZone != nil {
 					if s.SubnetAvailabilityZone.Name != nil {
-						rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetAvailabilityZone.name", i)] = string(*s.SubnetAvailabilityZone.Name)
+						rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetAvailabilityZone.name", i)] = *s.SubnetAvailabilityZone.Name
 					}
 				}
 				if s.SubnetIdentifier != nil {
-					rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetIdentifier", i)] = string(*s.SubnetIdentifier)
+					rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetIdentifier", i)] = *s.SubnetIdentifier
 				}
 				if s.SubnetOutpost != nil {
 					if s.SubnetOutpost.ARN != nil {
-						rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetOutpost.arn", i)] = string(*s.SubnetOutpost.ARN)
+						rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetOutpost.arn", i)] = *s.SubnetOutpost.ARN
 					}
 				}
 				if s.SubnetStatus != nil {
-					rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetStatus", i)] = string(*s.SubnetStatus)
+					rdsInstance.Status.InstanceInfo[fmt.Sprintf("dbSubnetGroup.subnets[%d].subnetStatus", i)] = *s.SubnetStatus
 				}
 			}
 		}
 		if dbInstance.Status.DBSubnetGroup.VPCID != nil {
-			rdsInstance.Status.InstanceInfo["dbSubnetGroup.vpcID"] = string(*dbInstance.Status.DBSubnetGroup.VPCID)
+			rdsInstance.Status.InstanceInfo["dbSubnetGroup.vpcID"] = *dbInstance.Status.DBSubnetGroup.VPCID
 		}
 	}
 	if dbInstance.Status.DBInstancePort != nil {
 		rdsInstance.Status.InstanceInfo["dbInstancePort"] = strconv.FormatInt(*dbInstance.Status.DBInstancePort, 10)
 	}
 	if dbInstance.Status.DBIResourceID != nil {
-		rdsInstance.Status.InstanceInfo["dbiResourceID"] = string(*dbInstance.Status.DBIResourceID)
+		rdsInstance.Status.InstanceInfo["dbiResourceID"] = *dbInstance.Status.DBIResourceID
 	}
 	if dbInstance.Status.DomainMemberships != nil {
 		for i, m := range dbInstance.Status.DomainMemberships {
 			if m.Domain != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].domain", i)] = string(*m.Domain)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].domain", i)] = *m.Domain
 			}
 			if m.FQDN != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].fQDN", i)] = string(*m.FQDN)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].fQDN", i)] = *m.FQDN
 			}
 			if m.IAMRoleName != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].iamRoleName", i)] = string(*m.IAMRoleName)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].iamRoleName", i)] = *m.IAMRoleName
 			}
 			if m.Status != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].status", i)] = string(*m.Status)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("domainMemberships[%d].status", i)] = *m.Status
 			}
 		}
 	}
 	if dbInstance.Status.EnabledCloudwatchLogsExports != nil {
 		for i, e := range dbInstance.Status.EnabledCloudwatchLogsExports {
 			if e != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("enabledCloudwatchLogsExports[%d]", i)] = string(*e)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("enabledCloudwatchLogsExports[%d]", i)] = *e
 			}
 		}
 	}
 	if dbInstance.Status.Endpoint != nil {
 		if dbInstance.Status.Endpoint.Address != nil {
-			rdsInstance.Status.InstanceInfo["endpoint.address"] = string(*dbInstance.Status.Endpoint.Address)
+			rdsInstance.Status.InstanceInfo["endpoint.address"] = *dbInstance.Status.Endpoint.Address
 		}
 		if dbInstance.Status.Endpoint.HostedZoneID != nil {
-			rdsInstance.Status.InstanceInfo["endpoint.hostedZoneID"] = string(*dbInstance.Status.Endpoint.HostedZoneID)
+			rdsInstance.Status.InstanceInfo["endpoint.hostedZoneID"] = *dbInstance.Status.Endpoint.HostedZoneID
 		}
 		if dbInstance.Status.Endpoint.Port != nil {
 			rdsInstance.Status.InstanceInfo["endpoint.port"] = strconv.FormatInt(*dbInstance.Status.Endpoint.Port, 10)
 		}
 	}
 	if dbInstance.Status.EnhancedMonitoringResourceARN != nil {
-		rdsInstance.Status.InstanceInfo["enhancedMonitoringResourceARN"] = string(*dbInstance.Status.EnhancedMonitoringResourceARN)
+		rdsInstance.Status.InstanceInfo["enhancedMonitoringResourceARN"] = *dbInstance.Status.EnhancedMonitoringResourceARN
 	}
 	if dbInstance.Status.IAMDatabaseAuthenticationEnabled != nil {
 		rdsInstance.Status.InstanceInfo["iamDatabaseAuthenticationEnabled"] = strconv.FormatBool(*dbInstance.Status.IAMDatabaseAuthenticationEnabled)
@@ -651,10 +692,10 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 	}
 	if dbInstance.Status.ListenerEndpoint != nil {
 		if dbInstance.Status.ListenerEndpoint.Address != nil {
-			rdsInstance.Status.InstanceInfo["listenerEndpoint.address"] = string(*dbInstance.Status.ListenerEndpoint.Address)
+			rdsInstance.Status.InstanceInfo["listenerEndpoint.address"] = *dbInstance.Status.ListenerEndpoint.Address
 		}
 		if dbInstance.Status.ListenerEndpoint.HostedZoneID != nil {
-			rdsInstance.Status.InstanceInfo["listenerEndpoint.hostedZoneID"] = string(*dbInstance.Status.ListenerEndpoint.HostedZoneID)
+			rdsInstance.Status.InstanceInfo["listenerEndpoint.hostedZoneID"] = *dbInstance.Status.ListenerEndpoint.HostedZoneID
 		}
 		if dbInstance.Status.ListenerEndpoint.Port != nil {
 			rdsInstance.Status.InstanceInfo["listenerEndpoint.port"] = strconv.FormatInt(*dbInstance.Status.ListenerEndpoint.Port, 10)
@@ -663,10 +704,10 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 	if dbInstance.Status.OptionGroupMemberships != nil {
 		for i, m := range dbInstance.Status.OptionGroupMemberships {
 			if m.OptionGroupName != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("optionGroupMemberships[%d].optionGroupName", i)] = string(*m.OptionGroupName)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("optionGroupMemberships[%d].optionGroupName", i)] = *m.OptionGroupName
 			}
 			if m.Status != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("optionGroupMemberships[%d].status", i)] = string(*m.Status)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("optionGroupMemberships[%d].status", i)] = *m.Status
 			}
 		}
 	}
@@ -675,25 +716,25 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 			rdsInstance.Status.InstanceInfo["pendingModifiedValues.allocatedStorage"] = strconv.FormatInt(*dbInstance.Status.PendingModifiedValues.AllocatedStorage, 10)
 		}
 		if dbInstance.Status.PendingModifiedValues.AutomationMode != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.automationMode"] = string(*dbInstance.Status.PendingModifiedValues.AutomationMode)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.automationMode"] = *dbInstance.Status.PendingModifiedValues.AutomationMode
 		}
 		if dbInstance.Status.PendingModifiedValues.BackupRetentionPeriod != nil {
 			rdsInstance.Status.InstanceInfo["pendingModifiedValues.backupRetentionPeriod"] = strconv.FormatInt(*dbInstance.Status.PendingModifiedValues.BackupRetentionPeriod, 10)
 		}
 		if dbInstance.Status.PendingModifiedValues.CACertificateIdentifier != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.caCertificateIdentifier"] = string(*dbInstance.Status.PendingModifiedValues.CACertificateIdentifier)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.caCertificateIdentifier"] = *dbInstance.Status.PendingModifiedValues.CACertificateIdentifier
 		}
 		if dbInstance.Status.PendingModifiedValues.DBInstanceClass != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.dbInstanceClass"] = string(*dbInstance.Status.PendingModifiedValues.DBInstanceClass)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.dbInstanceClass"] = *dbInstance.Status.PendingModifiedValues.DBInstanceClass
 		}
 		if dbInstance.Status.PendingModifiedValues.DBInstanceIdentifier != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.dbInstanceIdentifier"] = string(*dbInstance.Status.PendingModifiedValues.DBInstanceIdentifier)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.dbInstanceIdentifier"] = *dbInstance.Status.PendingModifiedValues.DBInstanceIdentifier
 		}
 		if dbInstance.Status.PendingModifiedValues.DBSubnetGroupName != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.dbSubnetGroupName"] = string(*dbInstance.Status.PendingModifiedValues.DBSubnetGroupName)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.dbSubnetGroupName"] = *dbInstance.Status.PendingModifiedValues.DBSubnetGroupName
 		}
 		if dbInstance.Status.PendingModifiedValues.EngineVersion != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.engineVersion"] = string(*dbInstance.Status.PendingModifiedValues.EngineVersion)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.engineVersion"] = *dbInstance.Status.PendingModifiedValues.EngineVersion
 		}
 		if dbInstance.Status.PendingModifiedValues.IAMDatabaseAuthenticationEnabled != nil {
 			rdsInstance.Status.InstanceInfo["pendingModifiedValues.iamDatabaseAuthenticationEnabled"] = strconv.FormatBool(*dbInstance.Status.PendingModifiedValues.IAMDatabaseAuthenticationEnabled)
@@ -702,10 +743,10 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 			rdsInstance.Status.InstanceInfo["pendingModifiedValues.iops"] = strconv.FormatInt(*dbInstance.Status.PendingModifiedValues.IOPS, 10)
 		}
 		if dbInstance.Status.PendingModifiedValues.LicenseModel != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.licenseModel"] = string(*dbInstance.Status.PendingModifiedValues.LicenseModel)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.licenseModel"] = *dbInstance.Status.PendingModifiedValues.LicenseModel
 		}
 		if dbInstance.Status.PendingModifiedValues.MasterUserPassword != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.masterUserPassword"] = string(*dbInstance.Status.PendingModifiedValues.MasterUserPassword)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.masterUserPassword"] = *dbInstance.Status.PendingModifiedValues.MasterUserPassword
 		}
 		if dbInstance.Status.PendingModifiedValues.MultiAZ != nil {
 			rdsInstance.Status.InstanceInfo["pendingModifiedValues.multiAZ"] = strconv.FormatBool(*dbInstance.Status.PendingModifiedValues.MultiAZ)
@@ -714,14 +755,14 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 			if dbInstance.Status.PendingModifiedValues.PendingCloudwatchLogsExports.LogTypesToDisable != nil {
 				for i, d := range dbInstance.Status.PendingModifiedValues.PendingCloudwatchLogsExports.LogTypesToDisable {
 					if d != nil {
-						rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.pendingCloudwatchLogsExports.logTypesToDisable[%d]", i)] = string(*d)
+						rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.pendingCloudwatchLogsExports.logTypesToDisable[%d]", i)] = *d
 					}
 				}
 			}
 			if dbInstance.Status.PendingModifiedValues.PendingCloudwatchLogsExports.LogTypesToEnable != nil {
 				for i, e := range dbInstance.Status.PendingModifiedValues.PendingCloudwatchLogsExports.LogTypesToEnable {
 					if e != nil {
-						rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.pendingCloudwatchLogsExports.logTypesToEnable[%d]", i)] = string(*e)
+						rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.pendingCloudwatchLogsExports.logTypesToEnable[%d]", i)] = *e
 					}
 				}
 			}
@@ -732,10 +773,10 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 		if dbInstance.Status.PendingModifiedValues.ProcessorFeatures != nil {
 			for i, f := range dbInstance.Status.PendingModifiedValues.ProcessorFeatures {
 				if f.Name != nil {
-					rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.ProcessorFeature[%d].name", i)] = string(*f.Name)
+					rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.ProcessorFeature[%d].name", i)] = *f.Name
 				}
 				if f.Value != nil {
-					rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.ProcessorFeature[%d].value", i)] = string(*f.Value)
+					rdsInstance.Status.InstanceInfo[fmt.Sprintf("pendingModifiedValues.ProcessorFeature[%d].value", i)] = *f.Value
 				}
 			}
 		}
@@ -743,7 +784,7 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 			rdsInstance.Status.InstanceInfo["pendingModifiedValues.resumeFullAutomationModeTime"] = dbInstance.Status.PendingModifiedValues.ResumeFullAutomationModeTime.String()
 		}
 		if dbInstance.Status.PendingModifiedValues.StorageType != nil {
-			rdsInstance.Status.InstanceInfo["pendingModifiedValues.storageType"] = string(*dbInstance.Status.PendingModifiedValues.StorageType)
+			rdsInstance.Status.InstanceInfo["pendingModifiedValues.storageType"] = *dbInstance.Status.PendingModifiedValues.StorageType
 		}
 	}
 	if dbInstance.Status.PerformanceInsightsEnabled != nil {
@@ -752,62 +793,62 @@ func setDBInstanceStatus(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdba
 	if dbInstance.Status.ReadReplicaDBClusterIdentifiers != nil {
 		for i, id := range dbInstance.Status.ReadReplicaDBClusterIdentifiers {
 			if id != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("readReplicaDBClusterIdentifiers[%d]", i)] = string(*id)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("readReplicaDBClusterIdentifiers[%d]", i)] = *id
 			}
 		}
 	}
 	if dbInstance.Status.ReadReplicaDBInstanceIdentifiers != nil {
 		for i, id := range dbInstance.Status.ReadReplicaDBInstanceIdentifiers {
 			if id != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("readReplicaDBInstanceIdentifiers[%d]", i)] = string(*id)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("readReplicaDBInstanceIdentifiers[%d]", i)] = *id
 			}
 		}
 	}
 	if dbInstance.Status.ReadReplicaSourceDBInstanceIdentifier != nil {
-		rdsInstance.Status.InstanceInfo["readReplicaSourceDBInstanceIdentifier"] = string(*dbInstance.Status.ReadReplicaSourceDBInstanceIdentifier)
+		rdsInstance.Status.InstanceInfo["readReplicaSourceDBInstanceIdentifier"] = *dbInstance.Status.ReadReplicaSourceDBInstanceIdentifier
 	}
 	if dbInstance.Status.ReplicaMode != nil {
-		rdsInstance.Status.InstanceInfo["replicaMode"] = string(*dbInstance.Status.ReplicaMode)
+		rdsInstance.Status.InstanceInfo["replicaMode"] = *dbInstance.Status.ReplicaMode
 	}
 	if dbInstance.Status.ResumeFullAutomationModeTime != nil {
 		rdsInstance.Status.InstanceInfo["resumeFullAutomationModeTime"] = dbInstance.Status.ResumeFullAutomationModeTime.String()
 	}
 	if dbInstance.Status.SecondaryAvailabilityZone != nil {
-		rdsInstance.Status.InstanceInfo["secondaryAvailabilityZone"] = string(*dbInstance.Status.SecondaryAvailabilityZone)
+		rdsInstance.Status.InstanceInfo["secondaryAvailabilityZone"] = *dbInstance.Status.SecondaryAvailabilityZone
 	}
 	if dbInstance.Status.StatusInfos != nil {
 		for i, info := range dbInstance.Status.StatusInfos {
 			if info.Message != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].message", i)] = string(*info.Message)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].message", i)] = *info.Message
 			}
 			if info.Normal != nil {
 				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].normal", i)] = strconv.FormatBool(*info.Normal)
 			}
 			if info.Status != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].status", i)] = string(*info.Status)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].status", i)] = *info.Status
 			}
 			if info.StatusType != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].statusType", i)] = string(*info.StatusType)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("statusInfos[%d].statusType", i)] = *info.StatusType
 			}
 		}
 	}
 	if dbInstance.Status.TagList != nil {
 		for i, l := range dbInstance.Status.TagList {
 			if l.Key != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("tagList[%d].key", i)] = string(*l.Key)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("tagList[%d].key", i)] = *l.Key
 			}
 			if l.Value != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("tagList[%d].value", i)] = string(*l.Value)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("tagList[%d].value", i)] = *l.Value
 			}
 		}
 	}
 	if dbInstance.Status.VPCSecurityGroups != nil {
 		for i, g := range dbInstance.Status.VPCSecurityGroups {
 			if g.Status != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("vpcSecurityGroups[%d].status", i)] = string(*g.Status)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("vpcSecurityGroups[%d].status", i)] = *g.Status
 			}
 			if g.VPCSecurityGroupID != nil {
-				rdsInstance.Status.InstanceInfo[fmt.Sprintf("vpcSecurityGroups[%d].vpcSecurityGroupID", i)] = string(*g.VPCSecurityGroupID)
+				rdsInstance.Status.InstanceInfo[fmt.Sprintf("vpcSecurityGroups[%d].vpcSecurityGroupID", i)] = *g.VPCSecurityGroupID
 			}
 		}
 	}

@@ -20,6 +20,11 @@ func generateUsername(engine string) string {
 	}
 }
 
+func generateDBName(engine string) string {
+	//TODO
+	return
+}
+
 func generatePassword() string {
 	length := 12
 	buf := make([]byte, length)

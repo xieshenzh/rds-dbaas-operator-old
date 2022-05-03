@@ -21,11 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	NamespaceTypeLabelValue = "rds-account"
-	NamespaceTypeLabelKey   = "namespace/type"
-)
-
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 

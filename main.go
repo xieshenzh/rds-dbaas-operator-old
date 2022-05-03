@@ -89,9 +89,9 @@ func main() {
 						dbaasv1alpha1.TypeLabelKey: dbaasv1alpha1.TypeLabelValue,
 					}),
 				},
-				&v1.Namespace{}: {
+				&v1.ConfigMap{}: {
 					Label: labels.SelectorFromSet(labels.Set{
-						rdsv1alpha1.NamespaceTypeLabelKey: rdsv1alpha1.NamespaceTypeLabelValue,
+						dbaasv1alpha1.TypeLabelKey: dbaasv1alpha1.TypeLabelValue,
 					}),
 				},
 			},
