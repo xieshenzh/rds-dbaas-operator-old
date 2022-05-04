@@ -13,16 +13,27 @@ const (
 )
 
 func generateUsername(engine string) string {
-	if engine == "postgres" {
+	if engine == "postgres" || engine == "aurora-postgresql" {
 		return "postgres"
 	} else {
 		return "admin"
 	}
 }
 
-func generateDBName(engine string) string {
-	//TODO
-	return
+func generateDBName(engine string) *string {
+	switch engine {
+	case "postgres", "aurora-postgresql":
+		dbName := "postgres"
+		return &dbName
+	case "mysql", "mariadb", "aurora", "aurora-mysql":
+		dbName := "mysql"
+		return &dbName
+	case "oracle-se2", "oracle-se2-cdb", "oracle-ee", "oracle-ee-cdb", "custom-oracle-ee":
+		dbName := "orcl"
+		return &dbName
+	default:
+		return nil
+	}
 }
 
 func generatePassword() string {

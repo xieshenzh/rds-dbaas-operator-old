@@ -49,31 +49,32 @@ const (
 
 	instanceConditionReady = "ProvisionReady"
 
-	statusReasonUpdating       = "Updating"
-	statusReasonDeleting       = "Deleting"
-	statusReasonTerminated     = "Terminated"
-	statusReasonError          = "Error"
-	statusReasonInventoryError = "Inventory error"
+	instanceStatusReasonUpdating       = "Updating"
+	instanceStatusReasonDeleting       = "Deleting"
+	instanceStatusReasonTerminated     = "Terminated"
+	instanceStatusReasonError          = "Error"
+	instanceStatusReasonInventoryError = "Inventory error"
 
-	statusMessageUpdateError         = "Failed to update Instance"
-	statusMessageUpdating            = "Updating Instance"
-	statusMessageDeleting            = "Deleting Instance"
-	statusMessageError               = "Instance with error"
-	statusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
-	statusMessageInventoryNotFound   = "Inventory not Found"
-	statusMessageInventoryNotReady   = "Inventory not ready"
-	statusMessageGetInventoryError   = "Failed to get Inventory"
-	statusMessageGetInstanceError    = "Failed to get DB Instance"
+	instanceStatusMessageUpdateError         = "Failed to update Instance"
+	instanceStatusMessageUpdating            = "Updating Instance"
+	instanceStatusMessageDeleting            = "Deleting Instance"
+	instanceStatusMessageError               = "Instance with error"
+	instanceStatusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
+	instanceStatusMessageGetError            = "Failed to get DB Instance"
+	instanceStatusMessageDeleteError         = "Failed to delete DB Instance"
+	instanceStatusMessageInventoryNotFound   = "Inventory not found"
+	instanceStatusMessageInventoryNotReady   = "Inventory not ready"
+	instanceStatusMessageGetInventoryError   = "Failed to get Inventory"
 
-	phasePending  = "Pending"
-	phaseCreating = "Creating"
-	phaseUpdating = "Updating"
-	phaseDeleting = "Deleting"
-	phaseDeleted  = "Deleted"
-	phaseReady    = "Ready"
-	phaseError    = "Error"
-	phaseFailed   = "Failed"
-	phaseUnknown  = "Unknown"
+	instancePhasePending  = "Pending"
+	instancePhaseCreating = "Creating"
+	instancePhaseUpdating = "Updating"
+	instancePhaseDeleting = "Deleting"
+	instancePhaseDeleted  = "Deleted"
+	instancePhaseReady    = "Ready"
+	instancePhaseError    = "Error"
+	instancePhaseFailed   = "Failed"
+	instancePhaseUnknown  = "Unknown"
 
 	requiredParameterErrorTemplate = "required parameter %s is missing"
 	invalidParameterErrorTemplate  = "value of parameter %s is invalid"
@@ -107,8 +108,8 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		result = ctrl.Result{Requeue: true}
 		err = nil
 		provisionStatus = string(metav1.ConditionUnknown)
-		provisionStatusReason = statusReasonUpdating
-		provisionStatusMessage = statusMessageUpdating
+		provisionStatusReason = instanceStatusReasonUpdating
+		provisionStatusMessage = instanceStatusMessageUpdating
 	}
 
 	returnError := func(e error, reason, message string) {
@@ -170,7 +171,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	checkFinalizer := func() bool {
 		if instance.ObjectMeta.DeletionTimestamp.IsZero() {
 			if !controllerutil.ContainsFinalizer(&instance, instanceFinalizer) {
-				phase = phasePending
+				phase = instancePhasePending
 				controllerutil.AddFinalizer(&instance, instanceFinalizer)
 				if e := r.Update(ctx, &instance); e != nil {
 					if errors.IsConflict(e) {
@@ -179,17 +180,32 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						return true
 					}
 					logger.Error(e, "Failed to add finalizer to Instance")
-					returnError(e, statusReasonError, statusMessageUpdateError)
+					returnError(e, instanceStatusReasonError, instanceStatusMessageUpdateError)
 					return true
 				}
 				logger.Info("Finalizer added to Instance")
-				returnNotReady(statusReasonUpdating, statusMessageUpdating)
+				returnNotReady(instanceStatusReasonUpdating, instanceStatusMessageUpdating)
 				return true
 			}
 		} else {
 			if controllerutil.ContainsFinalizer(&instance, instanceFinalizer) {
-				phase = phaseDeleting
-				//TODO delete rds db instance
+				phase = instancePhaseDeleting
+				dbInstance := &rdsv1alpha1.DBInstance{}
+				if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
+					if !errors.IsNotFound(e) {
+						logger.Error(e, "Failed to get DB Instance status")
+						returnError(e, instanceStatusReasonError, instanceStatusMessageGetError)
+						return true
+					}
+				} else {
+					if e := r.Delete(ctx, dbInstance); e != nil {
+						logger.Error(e, "Failed to delete DB Instance")
+						returnError(e, instanceStatusReasonError, instanceStatusMessageDeleteError)
+						return true
+					}
+					returnUpdating()
+					return true
+				}
 
 				controllerutil.RemoveFinalizer(&instance, instanceFinalizer)
 				if e := r.Update(ctx, &instance); e != nil {
@@ -199,16 +215,16 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						return true
 					}
 					logger.Error(e, "Failed to remove finalizer from Instance")
-					returnError(e, statusReasonError, statusMessageUpdateError)
+					returnError(e, instanceStatusReasonError, instanceStatusMessageUpdateError)
 					return true
 				}
-				phase = phaseDeleted
-				returnNotReady(statusReasonUpdating, statusMessageUpdating)
+				phase = instancePhaseDeleted
+				returnNotReady(instanceStatusReasonUpdating, instanceStatusMessageUpdating)
 				return true
 			}
 
 			// Stop reconciliation as the item is being deleted
-			returnNotReady(statusReasonDeleting, statusMessageDeleting)
+			returnNotReady(instanceStatusReasonDeleting, instanceStatusMessageDeleting)
 			return true
 		}
 
@@ -225,29 +241,29 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		if r, e := controllerutil.CreateOrUpdate(ctx, r.Client, dbInstance, func() error {
 			if e := ophandler.SetOwnerAnnotations(&instance, dbInstance); e != nil {
-				logger.Error(e, "Failed to set owner for DBInstance")
-				returnError(e, statusReasonError, e.Error())
+				logger.Error(e, "Failed to set owner for DB Instance")
+				returnError(e, instanceStatusReasonError, e.Error())
 				return e
 			}
 			if e := ctrl.SetControllerReference(&inventory, dbInstance, r.Scheme); e != nil {
-				logger.Error(e, "Failed to set owner reference for the DBInstance")
-				returnError(e, statusReasonError, e.Error())
+				logger.Error(e, "Failed to set owner reference for DB Instance")
+				returnError(e, instanceStatusReasonError, e.Error())
 				return e
 			}
 			if e := r.setDBInstanceSpec(ctx, dbInstance, &instance); e != nil {
-				logger.Error(e, "Failed to set spec for DBInstance")
-				returnError(e, statusReasonError, e.Error())
+				logger.Error(e, "Failed to set spec for DB Instance")
+				returnError(e, instanceStatusReasonError, e.Error())
 				return e
 			}
 			return nil
 		}); e != nil {
-			logger.Error(e, "Failed to create or update the DBInstance")
-			returnError(e, statusReasonError, statusMessageCreateOrUpdateError)
+			logger.Error(e, "Failed to create or update DB Instance")
+			returnError(e, instanceStatusReasonError, instanceStatusMessageCreateOrUpdateError)
 			return true
 		} else if r == controllerutil.OperationResultCreated {
-			phase = phaseCreating
+			phase = instancePhaseCreating
 		} else if r == controllerutil.OperationResultUpdated {
-			phase = phaseUpdating
+			phase = instancePhaseUpdating
 		}
 
 		return false
@@ -256,8 +272,8 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	syncDBInstanceStatus := func() bool {
 		dbInstance := &rdsv1alpha1.DBInstance{}
 		if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
-			logger.Error(e, "Failed to get DBInstance status")
-			returnError(e, statusReasonError, statusMessageGetInstanceError)
+			logger.Error(e, "Failed to get DB Instance status")
+			returnError(e, instanceStatusReasonError, instanceStatusMessageGetError)
 			return true
 		}
 
@@ -281,7 +297,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return true
 			}
 			logger.Error(e, "Failed to sync Instance status")
-			returnError(e, statusReasonError, statusMessageUpdateError)
+			returnError(e, instanceStatusReasonError, instanceStatusMessageUpdateError)
 			return true
 		}
 		return false
@@ -292,25 +308,28 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			logger.Info("RDS Instance resource not found, has been deleted")
 			return
 		}
-		logger.Error(err, "Error fetching RDS Instance for reconcile")
+		logger.Error(err, "Failed to get RDS Instance")
 		return
 	}
 
 	defer updateInstanceReadyCondition()
 
-	if e := r.Get(ctx, client.ObjectKey{Namespace: instance.Spec.InventoryRef.Namespace, Name: instance.Spec.InventoryRef.Name}, &inventory); e != nil {
+	if e := r.Get(ctx, client.ObjectKey{Namespace: instance.Spec.InventoryRef.Namespace,
+		Name: instance.Spec.InventoryRef.Name}, &inventory); e != nil {
 		if errors.IsNotFound(e) {
 			logger.Info("RDS Inventory resource not found, may have been deleted")
-			returnError(e, statusReasonInventoryError, statusMessageInventoryNotFound)
+			returnError(e, instanceStatusReasonInventoryError, instanceStatusMessageInventoryNotFound)
 			return
 		}
-		logger.Error(e, "Error fetching RDS Inventory for reconcile")
-		returnError(e, statusReasonInventoryError, statusMessageGetInventoryError)
+		logger.Error(e, "Failed to get RDS Inventory")
+		returnError(e, instanceStatusReasonInventoryError, instanceStatusMessageGetInventoryError)
 		return
 	}
 
-	if condition := apimeta.FindStatusCondition(inventory.Status.Conditions, inventoryConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
-		returnRequeue(statusReasonError, statusMessageInventoryNotReady)
+	if condition := apimeta.FindStatusCondition(inventory.Status.Conditions, inventoryConditionReady); condition == nil ||
+		condition.Status != metav1.ConditionTrue {
+		logger.Info("RDS Inventory not ready")
+		returnRequeue(instanceStatusReasonInventoryError, instanceStatusMessageInventoryNotReady)
 		return
 	}
 
@@ -327,14 +346,14 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	switch instance.Status.Phase {
-	case phaseReady:
+	case instancePhaseReady:
 		returnReady()
-	case phaseFailed, phaseDeleted:
-		returnNotReady(statusReasonTerminated, instance.Status.Phase)
-	case phasePending, phaseCreating, phaseUpdating, phaseDeleting:
+	case instancePhaseFailed, instancePhaseDeleted:
+		returnNotReady(instanceStatusReasonTerminated, instance.Status.Phase)
+	case instancePhasePending, instancePhaseCreating, instancePhaseUpdating, instancePhaseDeleting:
 		returnUpdating()
-	case phaseError, phaseUnknown:
-		returnRequeue(statusReasonError, statusMessageError)
+	case instancePhaseError, instancePhaseUnknown:
+		returnRequeue(instanceStatusReasonError, instanceStatusMessageError)
 	default:
 	}
 
@@ -417,11 +436,11 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 	}
 
 	if e := r.setCredentials(ctx, dbInstance, rdsInstance); e != nil {
-		return fmt.Errorf("failed to set credentials for the DB instance")
+		return fmt.Errorf("failed to set credentials for DB instance")
 	}
 
 	dbName := generateDBName(*dbInstance.Spec.Engine)
-	dbInstance.Spec.DBName = &dbName
+	dbInstance.Spec.DBName = dbName
 
 	dbInstance.Spec.AvailabilityZone = &rdsInstance.Spec.CloudRegion
 
@@ -439,17 +458,17 @@ func (r *RDSInstanceReconciler) setCredentials(ctx context.Context, dbInstance *
 			secret.Namespace = rdsInstance.Namespace
 			secret.ObjectMeta.Labels = createSecretLabels(rdsInstance)
 			if e := ctrl.SetControllerReference(rdsInstance, secret, r.Scheme); e != nil {
-				logger.Error(e, "Failed to set owner reference for the credential secret")
+				logger.Error(e, "Failed to set owner reference for credential Secret")
 				return e
 			}
 			secret.Data["username"] = []byte(generateUsername(*dbInstance.Spec.Engine))
 			secret.Data["password"] = []byte(generatePassword())
 			if e := r.Create(ctx, secret); e != nil {
-				logger.Error(e, "Failed to create the credential secret")
+				logger.Error(e, "Failed to create credential secret")
 				return e
 			}
 		}
-		logger.Error(e, "Failed to retrieve the credential secret")
+		logger.Error(e, "Failed to retrieve credential secret")
 		return e
 	}
 
@@ -461,7 +480,7 @@ func (r *RDSInstanceReconciler) setCredentials(ctx context.Context, dbInstance *
 	} else {
 		var du []byte
 		if _, e := base64.StdEncoding.Decode(du, u); e != nil {
-			logger.Error(e, "Failed to decode the username in the credential secret")
+			logger.Error(e, "Failed to decode username in credential secret")
 			return e
 		}
 		username = string(du)
@@ -474,7 +493,7 @@ func (r *RDSInstanceReconciler) setCredentials(ctx context.Context, dbInstance *
 
 	if !nok || !pok {
 		if e := r.Update(ctx, secret); e != nil {
-			logger.Error(e, "Failed to update the credential secret")
+			logger.Error(e, "Failed to update credential secret")
 			return e
 		}
 	}
@@ -505,24 +524,24 @@ func createSecretLabels(rdsInstance *rdsdbaasv1alpha1.RDSInstance) map[string]st
 func setDBInstancePhase(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) {
 	switch *dbInstance.Status.DBInstanceStatus {
 	case "available":
-		rdsInstance.Status.Phase = phaseReady
+		rdsInstance.Status.Phase = instancePhaseReady
 	case "creating":
-		rdsInstance.Status.Phase = phaseCreating
+		rdsInstance.Status.Phase = instancePhaseCreating
 	case "deleting":
-		rdsInstance.Status.Phase = phaseDeleting
+		rdsInstance.Status.Phase = instancePhaseDeleting
 	case "failed":
-		rdsInstance.Status.Phase = phaseFailed
+		rdsInstance.Status.Phase = instancePhaseFailed
 	case "inaccessible-encryption-credentials-recoverable", "incompatible-parameters", "restore-error":
-		rdsInstance.Status.Phase = phaseError
+		rdsInstance.Status.Phase = instancePhaseError
 	case "backing-up", "configuring-enhanced-monitoring", "configuring-iam-database-auth", "configuring-log-exports",
 		"converting-to-vpc", "maintenance", "modifying", "moving-to-vpc", "rebooting", "resetting-master-credentials",
 		"renaming", "starting", "stopping", "storage-optimization", "upgrading":
-		rdsInstance.Status.Phase = phaseUpdating
+		rdsInstance.Status.Phase = instancePhaseUpdating
 	case "inaccessible-encryption-credentials", "incompatible-network", "incompatible-option-group", "incompatible-restore",
 		"insufficient-capacity", "stopped", "storage-full":
-		rdsInstance.Status.Phase = phaseUnknown
+		rdsInstance.Status.Phase = instancePhaseUnknown
 	default:
-		rdsInstance.Status.Phase = phaseUnknown
+		rdsInstance.Status.Phase = instancePhaseUnknown
 	}
 }
 
@@ -861,14 +880,14 @@ func (r *RDSInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&source.Kind{Type: &rdsv1alpha1.DBInstance{}},
 			handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
-				return []reconcile.Request{getAnnotationRequests(o)}
+				return []reconcile.Request{getOwnerInstanceRequests(o)}
 			}),
 		).
 		Complete(r)
 }
 
 // Code from operator-lib: https://github.com/operator-framework/operator-lib/blob/d389ad4d93a46dba047b11161b755141fc853098/handler/enqueue_annotation.go#L121
-func getAnnotationRequests(object client.Object) reconcile.Request {
+func getOwnerInstanceRequests(object client.Object) reconcile.Request {
 	if typeString, ok := object.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == "RDSInstance.dbaas.redhat.com" {
 		namespacedNameString, ok := object.GetAnnotations()[ophandler.NamespacedNameAnnotation]
 		if !ok || strings.TrimSpace(namespacedNameString) == "" {

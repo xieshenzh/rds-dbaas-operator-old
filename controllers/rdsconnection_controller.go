@@ -26,10 +26,14 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	dbaasv1alpha1 "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
@@ -42,6 +46,27 @@ const (
 	databaseProvider = "Red Hat DBaaS / Amazon Relational Database Service (RDS)"
 
 	connectionConditionReady = "ReadyForBinding"
+
+	connectionStatusReasonUpdating       = "Updating"
+	connectionStatusReasonError          = "Error"
+	connectionStatusReasonInstanceError  = "Instance error"
+	connectionStatusReasonInventoryError = "Inventory error"
+
+	connectionStatusMessageUpdateError       = "Failed to update Connection"
+	connectionStatusMessageUpdating          = "Updating Connection"
+	connectionStatusMessageSecret            = "Failed to create or update secret"
+	connectionStatusMessageConfigMap         = "Failed to create or update configmap"
+	connectionStatusMessageInstanceNotFound  = "Instance not found"
+	connectionStatusMessageInstanceNotReady  = "Instance not ready"
+	connectionStatusMessageGetInstanceError  = "Failed to get Instance"
+	connectionStatusMessagePasswordNotFound  = "Password not found"
+	connectionStatusMessagePasswordInvalid   = "Password invalid"
+	connectionStatusMessageUsernameNotFound  = "Username not found"
+	connectionStatusMessageEndpointNotFound  = "Endpoint not found"
+	connectionStatusMessageGetPasswordError  = "Failed to get secret for password"
+	connectionStatusMessageInventoryNotFound = "Inventory not found"
+	connectionStatusMessageInventoryNotReady = "Inventory not ready"
+	connectionStatusMessageGetInventoryError = "Failed to get Inventory"
 )
 
 // RDSConnectionReconciler reconciles a RDSConnection object
@@ -62,9 +87,52 @@ type RDSConnectionReconciler struct {
 func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
 
+	var bindingStatus, bindingStatusReason, bindingStatusMessage string
+
 	var connection rdsdbaasv1alpha1.RDSConnection
 	var inventory rdsdbaasv1alpha1.RDSInventory
 	var dbInstance rdsv1alpha1.DBInstance
+
+	returnError := func(e error, reason, message string) {
+		result = ctrl.Result{}
+		err = e
+		bindingStatus = string(metav1.ConditionFalse)
+		bindingStatusReason = reason
+		bindingStatusMessage = message
+	}
+
+	returnRequeue := func(reason, message string) {
+		result = ctrl.Result{Requeue: true}
+		err = nil
+		bindingStatus = string(metav1.ConditionFalse)
+		bindingStatusReason = reason
+		bindingStatusMessage = message
+	}
+
+	returnReady := func() {
+		bindingStatus = string(metav1.ConditionTrue)
+	}
+
+	updateConnectionReadyCondition := func() {
+		condition := metav1.Condition{
+			Type:    connectionConditionReady,
+			Status:  metav1.ConditionStatus(bindingStatus),
+			Reason:  bindingStatusReason,
+			Message: bindingStatusMessage,
+		}
+		apimeta.SetStatusCondition(&connection.Status.Conditions, condition)
+		if e := r.Status().Update(ctx, &connection); e != nil {
+			if errors.IsConflict(e) {
+				logger.Info("Connection modified, retry reconciling")
+				result = ctrl.Result{Requeue: true}
+			} else {
+				logger.Error(e, "Failed to update Connection status")
+				if err == nil {
+					err = e
+				}
+			}
+		}
+	}
 
 	if err = r.Get(ctx, req.NamespacedName, &connection); err != nil {
 		if errors.IsNotFound(err) {
@@ -75,20 +143,23 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return
 	}
 
+	defer updateConnectionReadyCondition()
+
 	if e := r.Get(ctx, client.ObjectKey{Namespace: connection.Spec.InventoryRef.Namespace,
 		Name: connection.Spec.InventoryRef.Name}, &inventory); e != nil {
 		if errors.IsNotFound(e) {
 			logger.Info("RDS Inventory resource not found, may have been deleted")
-			//TODO
+			returnError(e, connectionStatusReasonInventoryError, connectionStatusMessageInventoryNotFound)
 			return
 		}
-		logger.Error(e, "Error fetching RDS Inventory for reconcile")
-		//TODO
+		logger.Error(e, "Failed to get RDS Inventory")
+		returnError(e, connectionStatusReasonInventoryError, connectionStatusMessageGetInventoryError)
 		return
 	}
 
 	if condition := apimeta.FindStatusCondition(inventory.Status.Conditions, inventoryConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
-		//TODO
+		logger.Info("RDS Inventory not ready")
+		returnRequeue(connectionStatusReasonInventoryError, connectionStatusMessageInventoryNotReady)
 		return
 	}
 
@@ -100,65 +171,91 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 	if instanceName == nil {
-		//TODO
+		e := fmt.Errorf("instance %s not found", connection.Spec.InstanceID)
+		logger.Error(e, "DB Instance not found from Inventory")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageInstanceNotFound)
+		return
 	}
 
 	if e := r.Get(ctx, client.ObjectKey{Namespace: connection.Spec.InventoryRef.Namespace,
 		Name: *instanceName}, &dbInstance); e != nil {
-		//TODO
+		logger.Error(e, "Failed to get DB Instance")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageGetInstanceError)
+		return
 	}
 	if *dbInstance.Status.DBInstanceStatus != "available" {
-		//TODO
+		e := fmt.Errorf("instance %s not ready", connection.Spec.InstanceID)
+		logger.Error(e, "DB Instance not ready")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageInstanceNotReady)
+		return
 	}
 
 	if dbInstance.Spec.MasterUserPassword == nil {
-		//TODO
+		e := fmt.Errorf("instance %s master password not set", connection.Spec.InstanceID)
+		logger.Error(e, "DB Instance master password not set")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessagePasswordNotFound)
+		return
 	}
 	var secret *v1.Secret
 	if e := r.Get(ctx, client.ObjectKey{Namespace: dbInstance.Spec.MasterUserPassword.Namespace,
 		Name: dbInstance.Spec.MasterUserPassword.Name}, secret); e != nil {
-		//TODO
-	}
-	if secret == nil {
-		//TODO
+		logger.Error(e, "Failed to get secret for DB Instance master password")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageGetPasswordError)
+		return
 	}
 	if v, ok := secret.Data[dbInstance.Spec.MasterUserPassword.Key]; !ok || len(v) == 0 {
-		//TODO
+		e := fmt.Errorf("instance %s master password key not set", connection.Spec.InstanceID)
+		logger.Error(e, "DB Instance master password key not set")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessagePasswordInvalid)
+		return
 	}
-	if v, ok := secret.Data["username"]; !ok || len(v) == 0 {
-		//TODO
-	}
-	userSecret, err := r.createOrUpdateSecret(ctx, &connection, secret, &dbInstance)
-	if err != nil {
-		//TODO
+	if dbInstance.Spec.MasterUsername == nil {
+		e := fmt.Errorf("instance %s master username not set", connection.Spec.InstanceID)
+		logger.Error(e, "DB Instance master username not set")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageUsernameNotFound)
+		return
 	}
 
 	if dbInstance.Status.Endpoint == nil {
-		//TODO
+		e := fmt.Errorf("instance %s endpoint not found", connection.Spec.InstanceID)
+		logger.Error(e, "DB Instance endpoint not found")
+		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageEndpointNotFound)
+		return
 	}
-	dbConfigMap, err := r.createOrUpdateConfigMap(ctx, &connection, &dbInstance)
-	if err != nil {
-		//TODO
+
+	userSecret, e := r.createOrUpdateSecret(ctx, &connection, secret, &dbInstance)
+	if e != nil {
+		logger.Error(e, "Failed to create or update secret for connection")
+		returnError(e, connectionStatusReasonError, connectionStatusMessageSecret)
+		return
+	}
+
+	dbConfigMap, e := r.createOrUpdateConfigMap(ctx, &connection, &dbInstance)
+	if e != nil {
+		logger.Error(e, "Failed to create or update configmap for connection")
+		returnError(e, connectionStatusReasonError, connectionStatusMessageConfigMap)
+		return
 	}
 
 	connection.Status.CredentialsRef = &v1.LocalObjectReference{Name: userSecret.Name}
 	connection.Status.ConnectionInfoRef = &v1.LocalObjectReference{Name: dbConfigMap.Name}
-	if err := r.Status().Update(ctx, &connection); err != nil {
-		if errors.IsConflict(err) {
+	if e := r.Status().Update(ctx, &connection); e != nil {
+		if errors.IsConflict(e) {
 			logger.Info("Connection modified, retry reconciling")
-			return ctrl.Result{Requeue: true}, nil
+			returnRequeue(connectionStatusReasonUpdating, connectionStatusMessageUpdating)
+			return
 		}
-		logger.Error(err, "Failed to update Connection status")
+		logger.Error(e, "Failed to update Connection status")
+		returnError(e, connectionStatusReasonError, connectionStatusMessageUpdateError)
+		return
 	}
 
-	//TODO
-
+	returnReady()
 	return
 }
 
 func (r *RDSConnectionReconciler) createOrUpdateSecret(ctx context.Context, connection *rdsdbaasv1alpha1.RDSConnection,
 	dbSecret *v1.Secret, dbInstance *rdsv1alpha1.DBInstance) (*v1.Secret, error) {
-
 	secretName := fmt.Sprintf("%s-credentials", connection.Name)
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -175,7 +272,6 @@ func (r *RDSConnectionReconciler) createOrUpdateSecret(ctx context.Context, conn
 		return nil
 	})
 	if err != nil {
-		//TODO logger.Error(err, "Failed to create or update secret object for the sql user")
 		return nil, err
 	}
 	return secret, nil
@@ -207,7 +303,6 @@ func (r *RDSConnectionReconciler) createOrUpdateConfigMap(ctx context.Context, c
 		return nil
 	})
 	if err != nil {
-		//TODO logger.Error(err, "Failed to create or update configmap object for the cluster")
 		return nil, err
 	}
 	return cm, nil
@@ -232,6 +327,13 @@ func setConfigMap(cm *v1.ConfigMap, dbInstance *rdsv1alpha1.DBInstance) {
 	}
 	if dbInstance.Spec.DBName != nil {
 		dataMap["database"] = *dbInstance.Spec.DBName
+	} else {
+		switch *dbInstance.Spec.Engine {
+		case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web":
+			dataMap["database"] = "master"
+		default:
+			dataMap["database"] = *generateDBName(*dbInstance.Spec.Engine)
+		}
 	}
 
 	cm.Data = dataMap
@@ -239,9 +341,14 @@ func setConfigMap(cm *v1.ConfigMap, dbInstance *rdsv1alpha1.DBInstance) {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RDSConnectionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	//TODO
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&rdsdbaasv1alpha1.RDSConnection{}).
+		Watches(
+			&source.Kind{Type: &rdsv1alpha1.DBInstance{}},
+			handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
+				return getInstanceConnectionRequests(o, mgr)
+			}),
+		).
 		Complete(r); err != nil {
 		return err
 	}
@@ -255,4 +362,40 @@ func (r *RDSConnectionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return nil
+}
+
+func getInstanceConnectionRequests(object client.Object, mgr ctrl.Manager) []reconcile.Request {
+	ctx := context.Background()
+	logger := log.FromContext(ctx)
+	cli := mgr.GetClient()
+
+	dbInstance := object.(*rdsv1alpha1.DBInstance)
+	connectionList := &rdsdbaasv1alpha1.RDSConnectionList{}
+	if e := cli.List(ctx, connectionList, client.MatchingFields{instanceIDKey: *dbInstance.Spec.DBInstanceIdentifier}); e != nil {
+		logger.Error(e, "Failed to get Connections for DB Instance update", "DBInstance ID", dbInstance.Spec.DBInstanceIdentifier)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, c := range connectionList.Items {
+		match := false
+		if len(c.Spec.InventoryRef.Namespace) > 0 {
+			if c.Spec.InventoryRef.Namespace == dbInstance.Namespace {
+				match = true
+			}
+		} else {
+			if c.Namespace == dbInstance.Namespace {
+				match = true
+			}
+		}
+		if match {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: c.Namespace,
+					Name:      c.Name,
+				},
+			})
+		}
+	}
+	return requests
 }
