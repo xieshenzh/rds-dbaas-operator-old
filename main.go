@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -40,6 +41,10 @@ import (
 	rdsv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 	"github.com/xieshenzh/rds-dbaas-operator/controllers"
 	//+kubebuilder:scaffold:imports
+)
+
+const (
+	InstallNamespaceEnvVar = "INSTALL_NAMESPACE"
 )
 
 var (
@@ -109,9 +114,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	installNamespace, err := getInstallNamespace()
+	if err != nil {
+		setupLog.Error(err, "unable to retrieve install namespace")
+	}
+
 	if err = (&controllers.RDSInventoryReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		ACKInstallNamespace: installNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RDSInventory")
 		os.Exit(1)
@@ -154,4 +165,12 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func getInstallNamespace() (string, error) {
+	ns, found := os.LookupEnv(InstallNamespaceEnvVar)
+	if !found {
+		return "", fmt.Errorf("%s must be set", InstallNamespaceEnvVar)
+	}
+	return ns, nil
 }
