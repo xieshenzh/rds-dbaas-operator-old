@@ -49,11 +49,15 @@ const (
 
 	instanceConditionReady = "ProvisionReady"
 
-	instanceStatusReasonUpdating       = "Updating"
-	instanceStatusReasonDeleting       = "Deleting"
-	instanceStatusReasonTerminated     = "Terminated"
-	instanceStatusReasonError          = "Error"
-	instanceStatusReasonInventoryError = "Inventory error"
+	instanceStatusReasonReady               = "Ready"
+	instanceStatusReasonUpdating            = "Updating"
+	instanceStatusReasonDeleting            = "Deleting"
+	instanceStatusReasonTerminated          = "Terminated"
+	instanceStatusReasonInputError          = "InputError"
+	instanceStatusReasonBackendError        = "BackendError"
+	instanceStatusReasonNotFound            = "NotFound"
+	instanceStatusReasonAuthenticationError = "AuthenticationError"
+	instanceStatusReasonUnreachable         = "Unreachable"
 
 	instanceStatusMessageUpdateError         = "Failed to update Instance"
 	instanceStatusMessageUpdating            = "Updating Instance"
@@ -144,6 +148,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		result = ctrl.Result{}
 		err = nil
 		provisionStatus = string(metav1.ConditionTrue)
+		provisionStatusReason = instanceStatusReasonReady
 	}
 
 	updateInstanceReadyCondition := func() {
@@ -182,7 +187,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						return true
 					}
 					logger.Error(e, "Failed to add finalizer to Instance")
-					returnError(e, instanceStatusReasonError, instanceStatusMessageUpdateError)
+					returnError(e, instanceStatusReasonBackendError, instanceStatusMessageUpdateError)
 					return true
 				}
 				logger.Info("Finalizer added to Instance")
@@ -196,13 +201,13 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
 					if !errors.IsNotFound(e) {
 						logger.Error(e, "Failed to get DB Instance status")
-						returnError(e, instanceStatusReasonError, instanceStatusMessageGetError)
+						returnError(e, instanceStatusReasonBackendError, instanceStatusMessageGetError)
 						return true
 					}
 				} else {
 					if e := r.Delete(ctx, dbInstance); e != nil {
 						logger.Error(e, "Failed to delete DB Instance")
-						returnError(e, instanceStatusReasonError, instanceStatusMessageDeleteError)
+						returnError(e, instanceStatusReasonBackendError, instanceStatusMessageDeleteError)
 						return true
 					}
 					returnUpdating()
@@ -217,7 +222,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						return true
 					}
 					logger.Error(e, "Failed to remove finalizer from Instance")
-					returnError(e, instanceStatusReasonError, instanceStatusMessageUpdateError)
+					returnError(e, instanceStatusReasonBackendError, instanceStatusMessageUpdateError)
 					return true
 				}
 				phase = instancePhaseDeleted
@@ -244,18 +249,18 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if r, e := controllerutil.CreateOrUpdate(ctx, r.Client, dbInstance, func() error {
 			if e := ophandler.SetOwnerAnnotations(&instance, dbInstance); e != nil {
 				logger.Error(e, "Failed to set owner for DB Instance")
-				returnError(e, instanceStatusReasonError, e.Error())
+				returnError(e, instanceStatusReasonBackendError, e.Error())
 				return e
 			}
 			if e := r.setDBInstanceSpec(ctx, dbInstance, &instance); e != nil {
 				logger.Error(e, "Failed to set spec for DB Instance")
-				returnError(e, instanceStatusReasonError, e.Error())
+				returnError(e, instanceStatusReasonInputError, e.Error())
 				return e
 			}
 			return nil
 		}); e != nil {
 			logger.Error(e, "Failed to create or update DB Instance")
-			returnError(e, instanceStatusReasonError, instanceStatusMessageCreateOrUpdateError)
+			returnError(e, instanceStatusReasonBackendError, instanceStatusMessageCreateOrUpdateError)
 			return true
 		} else if r == controllerutil.OperationResultCreated {
 			phase = instancePhaseCreating
@@ -270,7 +275,11 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		dbInstance := &rdsv1alpha1.DBInstance{}
 		if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
 			logger.Error(e, "Failed to get DB Instance status")
-			returnError(e, instanceStatusReasonError, instanceStatusMessageGetError)
+			if errors.IsNotFound(e) {
+				returnError(e, instanceStatusReasonNotFound, instanceStatusMessageGetError)
+			} else {
+				returnError(e, instanceStatusReasonBackendError, instanceStatusMessageGetError)
+			}
 			return true
 		}
 
@@ -294,7 +303,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return true
 			}
 			logger.Error(e, "Failed to sync Instance status")
-			returnError(e, instanceStatusReasonError, instanceStatusMessageUpdateError)
+			returnError(e, instanceStatusReasonBackendError, instanceStatusMessageUpdateError)
 			return true
 		}
 		return false
@@ -315,18 +324,18 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Name: instance.Spec.InventoryRef.Name}, &inventory); e != nil {
 		if errors.IsNotFound(e) {
 			logger.Info("RDS Inventory resource not found, may have been deleted")
-			returnError(e, instanceStatusReasonInventoryError, instanceStatusMessageInventoryNotFound)
+			returnError(e, instanceStatusReasonNotFound, instanceStatusMessageInventoryNotFound)
 			return
 		}
 		logger.Error(e, "Failed to get RDS Inventory")
-		returnError(e, instanceStatusReasonInventoryError, instanceStatusMessageGetInventoryError)
+		returnError(e, instanceStatusReasonBackendError, instanceStatusMessageGetInventoryError)
 		return
 	}
 
 	if condition := apimeta.FindStatusCondition(inventory.Status.Conditions, inventoryConditionReady); condition == nil ||
 		condition.Status != metav1.ConditionTrue {
 		logger.Info("RDS Inventory not ready")
-		returnRequeue(instanceStatusReasonInventoryError, instanceStatusMessageInventoryNotReady)
+		returnRequeue(instanceStatusReasonUnreachable, instanceStatusMessageInventoryNotReady)
 		return
 	}
 
@@ -350,7 +359,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	case instancePhasePending, instancePhaseCreating, instancePhaseUpdating, instancePhaseDeleting:
 		returnUpdating()
 	case instancePhaseError, instancePhaseUnknown:
-		returnRequeue(instanceStatusReasonError, instanceStatusMessageError)
+		returnRequeue(instanceStatusReasonBackendError, instanceStatusMessageError)
 	default:
 	}
 

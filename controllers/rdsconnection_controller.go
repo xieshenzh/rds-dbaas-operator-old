@@ -47,10 +47,13 @@ const (
 
 	connectionConditionReady = "ReadyForBinding"
 
-	connectionStatusReasonUpdating       = "Updating"
-	connectionStatusReasonError          = "Error"
-	connectionStatusReasonInstanceError  = "Instance error"
-	connectionStatusReasonInventoryError = "Inventory error"
+	connectionStatusReasonReady               = "Ready"
+	connectionStatusReasonUpdating            = "Updating"
+	connectionStatusReasonBackendError        = "BackendError"
+	connectionStatusReasonInputError          = "InputError"
+	connectionStatusReasonNotFound            = "NotFound"
+	connectionStatusReasonUnreachable         = "Unreachable"
+	connectionStatusReasonAuthenticationError = "AuthenticationError"
 
 	connectionStatusMessageUpdateError       = "Failed to update Connection"
 	connectionStatusMessageUpdating          = "Updating Connection"
@@ -115,6 +118,7 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		result = ctrl.Result{}
 		err = nil
 		bindingStatus = string(metav1.ConditionTrue)
+		bindingStatusReason = connectionStatusReasonReady
 	}
 
 	updateConnectionReadyCondition := func() {
@@ -153,17 +157,17 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Name: connection.Spec.InventoryRef.Name}, &inventory); e != nil {
 		if errors.IsNotFound(e) {
 			logger.Info("RDS Inventory resource not found, may have been deleted")
-			returnError(e, connectionStatusReasonInventoryError, connectionStatusMessageInventoryNotFound)
+			returnError(e, connectionStatusReasonNotFound, connectionStatusMessageInventoryNotFound)
 			return
 		}
 		logger.Error(e, "Failed to get RDS Inventory")
-		returnError(e, connectionStatusReasonInventoryError, connectionStatusMessageGetInventoryError)
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetInventoryError)
 		return
 	}
 
 	if condition := apimeta.FindStatusCondition(inventory.Status.Conditions, inventoryConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
 		logger.Info("RDS Inventory not ready")
-		returnRequeue(connectionStatusReasonInventoryError, connectionStatusMessageInventoryNotReady)
+		returnRequeue(connectionStatusReasonUnreachable, connectionStatusMessageInventoryNotReady)
 		return
 	}
 
@@ -177,67 +181,71 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if instanceName == nil {
 		e := fmt.Errorf("instance %s not found", connection.Spec.InstanceID)
 		logger.Error(e, "DB Instance not found from Inventory")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageInstanceNotFound)
+		returnError(e, connectionStatusReasonNotFound, connectionStatusMessageInstanceNotFound)
 		return
 	}
 
 	if e := r.Get(ctx, client.ObjectKey{Namespace: connection.Spec.InventoryRef.Namespace,
 		Name: *instanceName}, &dbInstance); e != nil {
 		logger.Error(e, "Failed to get DB Instance")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageGetInstanceError)
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetInstanceError)
 		return
 	}
 	if *dbInstance.Status.DBInstanceStatus != "available" {
 		e := fmt.Errorf("instance %s not ready", connection.Spec.InstanceID)
 		logger.Error(e, "DB Instance not ready")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageInstanceNotReady)
+		returnError(e, connectionStatusReasonUnreachable, connectionStatusMessageInstanceNotReady)
 		return
 	}
 
 	if dbInstance.Spec.MasterUserPassword == nil {
 		e := fmt.Errorf("instance %s master password not set", connection.Spec.InstanceID)
 		logger.Error(e, "DB Instance master password not set")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessagePasswordNotFound)
+		returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordNotFound)
 		return
 	}
 	var secret *v1.Secret
 	if e := r.Get(ctx, client.ObjectKey{Namespace: dbInstance.Spec.MasterUserPassword.Namespace,
 		Name: dbInstance.Spec.MasterUserPassword.Name}, secret); e != nil {
 		logger.Error(e, "Failed to get secret for DB Instance master password")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageGetPasswordError)
+		if errors.IsNotFound(e) {
+			returnError(e, connectionStatusReasonNotFound, connectionStatusMessageGetPasswordError)
+		} else {
+			returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetPasswordError)
+		}
 		return
 	}
 	if v, ok := secret.Data[dbInstance.Spec.MasterUserPassword.Key]; !ok || len(v) == 0 {
 		e := fmt.Errorf("instance %s master password key not set", connection.Spec.InstanceID)
 		logger.Error(e, "DB Instance master password key not set")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessagePasswordInvalid)
+		returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordInvalid)
 		return
 	}
 	if dbInstance.Spec.MasterUsername == nil {
 		e := fmt.Errorf("instance %s master username not set", connection.Spec.InstanceID)
 		logger.Error(e, "DB Instance master username not set")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageUsernameNotFound)
+		returnError(e, connectionStatusReasonInputError, connectionStatusMessageUsernameNotFound)
 		return
 	}
 
 	if dbInstance.Status.Endpoint == nil {
 		e := fmt.Errorf("instance %s endpoint not found", connection.Spec.InstanceID)
 		logger.Error(e, "DB Instance endpoint not found")
-		returnError(e, connectionStatusReasonInstanceError, connectionStatusMessageEndpointNotFound)
+		returnError(e, connectionStatusReasonUnreachable, connectionStatusMessageEndpointNotFound)
 		return
 	}
 
 	userSecret, e := r.createOrUpdateSecret(ctx, &connection, secret, &dbInstance)
 	if e != nil {
 		logger.Error(e, "Failed to create or update secret for connection")
-		returnError(e, connectionStatusReasonError, connectionStatusMessageSecret)
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageSecret)
 		return
 	}
 
 	dbConfigMap, e := r.createOrUpdateConfigMap(ctx, &connection, &dbInstance)
 	if e != nil {
 		logger.Error(e, "Failed to create or update configmap for connection")
-		returnError(e, connectionStatusReasonError, connectionStatusMessageConfigMap)
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageConfigMap)
 		return
 	}
 
@@ -250,7 +258,7 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return
 		}
 		logger.Error(e, "Failed to update Connection status")
-		returnError(e, connectionStatusReasonError, connectionStatusMessageUpdateError)
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageUpdateError)
 		return
 	}
 
