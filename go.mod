@@ -5,6 +5,8 @@ go 1.17
 require (
 	github.com/RHEcosystemAppEng/dbaas-operator v0.1.5-0.20220329142537-6708678c607a
 	github.com/aws-controllers-k8s/rds-controller v0.0.24
+	github.com/aws-controllers-k8s/runtime v0.18.4
+	github.com/aws/aws-sdk-go-v2/service/rds v1.21.0
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.17.0
 	github.com/operator-framework/operator-lib v0.10.0
@@ -23,8 +25,8 @@ require (
 	github.com/Azure/go-autorest/autorest/date v0.3.0 // indirect
 	github.com/Azure/go-autorest/logger v0.2.1 // indirect
 	github.com/Azure/go-autorest/tracing v0.6.0 // indirect
-	github.com/aws-controllers-k8s/runtime v0.18.4 // indirect
 	github.com/aws/aws-sdk-go v1.42.0 // indirect
+	github.com/aws/smithy-go v1.11.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.1.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -36,7 +38,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/google/go-cmp v0.5.6 // indirect
+	github.com/google/go-cmp v0.5.7 // indirect
 	github.com/google/gofuzz v1.1.0 // indirect
 	github.com/google/uuid v1.1.2 // indirect
 	github.com/googleapis/gnostic v0.5.5 // indirect
