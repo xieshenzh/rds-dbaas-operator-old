@@ -45,6 +45,12 @@ const (
 	adpotedDBInstanceLabelValue = "true"
 
 	inventoryConditionReady = "SpecSynced"
+
+	inventoryStatusMessageSyncOK              = "SyncOK"
+	inventoryStatusMessageInputError          = "InputError"
+	inventoryStatusMessageBackendError        = "BackendError"
+	inventoryStatusMessageEndpointUnreachable = "EndpointUnreachable"
+	inventoryStatusMessageAuthenticationError = "AuthenticationError"
 )
 
 // RDSInventoryReconciler reconciles a RDSInventory object
@@ -199,7 +205,7 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	for _, dbInstance := range dbInstanceList.Items {
 		instance := dbaasv1alpha1.Instance{
 			InstanceID:   *dbInstance.Spec.DBInstanceIdentifier,
-			Name:         *dbInstance.Spec.DBInstanceIdentifier,
+			Name:         dbInstance.Name,
 			InstanceInfo: parseDBInstanceStatus(&dbInstance),
 		}
 		instances = append(instances, instance)
