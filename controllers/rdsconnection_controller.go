@@ -47,13 +47,12 @@ const (
 
 	connectionConditionReady = "ReadyForBinding"
 
-	connectionStatusReasonReady               = "Ready"
-	connectionStatusReasonUpdating            = "Updating"
-	connectionStatusReasonBackendError        = "BackendError"
-	connectionStatusReasonInputError          = "InputError"
-	connectionStatusReasonNotFound            = "NotFound"
-	connectionStatusReasonUnreachable         = "Unreachable"
-	connectionStatusReasonAuthenticationError = "AuthenticationError"
+	connectionStatusReasonReady        = "Ready"
+	connectionStatusReasonUpdating     = "Updating"
+	connectionStatusReasonBackendError = "BackendError"
+	connectionStatusReasonInputError   = "InputError"
+	connectionStatusReasonNotFound     = "NotFound"
+	connectionStatusReasonUnreachable  = "Unreachable"
 
 	connectionStatusMessageUpdateError       = "Failed to update Connection"
 	connectionStatusMessageUpdating          = "Updating Connection"
@@ -145,10 +144,10 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err = r.Get(ctx, req.NamespacedName, &connection); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("RDS Connection resource not found, has been deleted")
-			return
+			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Error fetching RDS Connection for reconcile")
-		return
+		return ctrl.Result{}, err
 	}
 
 	defer updateConnectionReadyCondition()

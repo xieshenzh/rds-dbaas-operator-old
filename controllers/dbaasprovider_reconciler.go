@@ -55,12 +55,12 @@ const (
 	typeLabelName       = "type"
 	typeLabelValue      = "dbaas-provider-registration"
 
-	provisionDocURL      = "" //TODO
-	provisionDescription = "" //TODO
+	provisionDocURL      = "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/"
+	provisionDescription = "Amazon Relational Database Service (Amazon RDS) is a web service that makes it easier to set up, operate, and scale a relational database in the AWS Cloud. It provides cost-efficient, resizable capacity for an industry-standard relational database and manages common database administration tasks."
 
 	provider           = "Red Hat DBaaS / Amazon Relational Database Service"
 	displayName        = "Amazon Relational Database Service"
-	displayDescription = "" //TODO
+	displayDescription = "Amazon Relational Database Service (RDS) is a collection of managed services that makes it simple to set up, operate, and scale databases in the cloud."
 	iconData           = "" //TODO
 	mediaType          = "image/png"
 )
@@ -185,78 +185,109 @@ func bridgeProviderCR(clusterRoleList *rbac.ClusterRoleList) *dbaasoperator.DBaa
 					MediaType: mediaType,
 				},
 			},
-			InventoryKind:                inventoryKind,
-			ConnectionKind:               connectionKind,
-			InstanceKind:                 instanceKind,
-			CredentialFields:             []dbaasoperator.CredentialField{}, //TODO
+			InventoryKind:  inventoryKind,
+			ConnectionKind: connectionKind,
+			InstanceKind:   instanceKind,
+			CredentialFields: []dbaasoperator.CredentialField{
+				{
+					Key:         awsAccessKeyID,
+					DisplayName: "AWS Access Key ID",
+					Type:        "maskedstring",
+					Required:    true,
+				},
+				{
+					Key:         awsSecretAccessKey,
+					DisplayName: "AWS Secret Access Key",
+					Type:        "maskedstring",
+					Required:    true,
+				},
+				{
+					Key:         awsRegion,
+					DisplayName: "AWS Region",
+					Type:        "string",
+					Required:    true,
+				},
+				{
+					Key:         ackResourceTags,
+					DisplayName: "ACK Resource Tags",
+					Type:        "string",
+					Required:    false,
+				},
+				{
+					Key:         ackLogLevel,
+					DisplayName: "ACK Log Level",
+					Type:        "string",
+					Required:    false,
+				},
+			},
 			AllowsFreeTrial:              false,
 			ExternalProvisionURL:         provisionDocURL,
 			ExternalProvisionDescription: provisionDescription,
 			InstanceParameterSpecs: []dbaasoperator.InstanceParameterSpec{
 				{
-					Name:        "Engine",
+					Name:        engine,
 					DisplayName: "Engine Type",
 					Type:        "string",
 					Required:    true,
 				},
 				{
-					Name:        "EngineVersion",
+					Name:        engineVersion,
 					DisplayName: "Engine Version",
 					Type:        "string",
 					Required:    false,
 				},
 				{
-					Name:        "DBInstanceIdentifier",
+					Name:        dbInstanceIdentifier,
 					DisplayName: "DB instance identifier",
 					Type:        "string",
 					Required:    true,
 				},
 				{
-					Name:        "DBInstanceClass",
+					Name:        dbInstanceClass,
 					DisplayName: "DB instance class",
 					Type:        "string",
 					Required:    true,
 				},
 				{
-					Name:         "StorageType",
+					Name:         storageType,
 					DisplayName:  "Storage type",
 					Type:         "string",
 					Required:     false,
 					DefaultValue: "gp2",
 				},
 				{
-					Name:         "AllocatedStorage",
+					Name:         allocatedStorage,
 					DisplayName:  "Allocated storage",
 					Type:         "int",
 					Required:     true,
 					DefaultValue: "20",
 				},
 				{
-					Name:        "IOPS",
+					Name:        iops,
 					DisplayName: "Provisioned IOPS",
 					Type:        "int",
 					Required:    false,
 				},
 				{
-					Name:        "MaxAllocatedStorage",
+					Name:        maxAllocatedStorage,
 					DisplayName: "Maximum storage threshold",
 					Type:        "int",
 					Required:    false,
 				},
 				{
-					Name:        "DBSubnetGroupName",
+					Name:        dbSubnetGroupName,
 					DisplayName: "Subnet group",
 					Type:        "string",
 					Required:    false,
 				},
 				{
-					Name:        "PubliclyAccessible",
+					Name:        publiclyAccessible,
 					DisplayName: "Public access",
 					Type:        "bool",
 					Required:    false,
 				},
 				{
-					Name:        "VPCSecurityGroupIDs",
+					Name:        vpcSecurityGroupIDs,
 					DisplayName: "VPC security groups",
 					Type:        "string",
 					Required:    false,

@@ -45,19 +45,30 @@ import (
 )
 
 const (
+	engine               = "Engine"
+	engineVersion        = "EngineVersion"
+	dbInstanceIdentifier = "DBInstanceIdentifier"
+	dbInstanceClass      = "DBInstanceClass"
+	storageType          = "StorageType"
+	allocatedStorage     = "AllocatedStorage"
+	iops                 = "IOPS"
+	maxAllocatedStorage  = "MaxAllocatedStorage"
+	dbSubnetGroupName    = "DBSubnetGroupName"
+	publiclyAccessible   = "PubliclyAccessible"
+	vpcSecurityGroupIDs  = "VPCSecurityGroupIDs"
+
 	instanceFinalizer = "rds.dbaas.redhat.com/instance"
 
 	instanceConditionReady = "ProvisionReady"
 
-	instanceStatusReasonReady               = "Ready"
-	instanceStatusReasonUpdating            = "Updating"
-	instanceStatusReasonDeleting            = "Deleting"
-	instanceStatusReasonTerminated          = "Terminated"
-	instanceStatusReasonInputError          = "InputError"
-	instanceStatusReasonBackendError        = "BackendError"
-	instanceStatusReasonNotFound            = "NotFound"
-	instanceStatusReasonAuthenticationError = "AuthenticationError"
-	instanceStatusReasonUnreachable         = "Unreachable"
+	instanceStatusReasonReady        = "Ready"
+	instanceStatusReasonUpdating     = "Updating"
+	instanceStatusReasonDeleting     = "Deleting"
+	instanceStatusReasonTerminated   = "Terminated"
+	instanceStatusReasonInputError   = "InputError"
+	instanceStatusReasonBackendError = "BackendError"
+	instanceStatusReasonNotFound     = "NotFound"
+	instanceStatusReasonUnreachable  = "Unreachable"
 
 	instanceStatusMessageUpdateError         = "Failed to update Instance"
 	instanceStatusMessageUpdating            = "Updating Instance"
@@ -312,10 +323,10 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err = r.Get(ctx, req.NamespacedName, &instance); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("RDS Instance resource not found, has been deleted")
-			return
+			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get RDS Instance")
-		return
+		return ctrl.Result{}, err
 	}
 
 	defer updateInstanceReadyCondition()
@@ -367,33 +378,33 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) error {
-	if engine, ok := rdsInstance.Spec.OtherInstanceParams["Engine"]; ok {
+	if engine, ok := rdsInstance.Spec.OtherInstanceParams[engine]; ok {
 		dbInstance.Spec.Engine = &engine
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "Engine")
 	}
 
-	if engineVersion, ok := rdsInstance.Spec.OtherInstanceParams["EngineVersion"]; ok {
+	if engineVersion, ok := rdsInstance.Spec.OtherInstanceParams[engineVersion]; ok {
 		dbInstance.Spec.EngineVersion = &engineVersion
 	}
 
-	if dbInstanceId, ok := rdsInstance.Spec.OtherInstanceParams["DBInstanceIdentifier"]; ok {
+	if dbInstanceId, ok := rdsInstance.Spec.OtherInstanceParams[dbInstanceIdentifier]; ok {
 		dbInstance.Spec.DBInstanceIdentifier = &dbInstanceId
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceIdentifier")
 	}
 
-	if dbInstanceClass, ok := rdsInstance.Spec.OtherInstanceParams["DBInstanceClass"]; ok {
+	if dbInstanceClass, ok := rdsInstance.Spec.OtherInstanceParams[dbInstanceClass]; ok {
 		dbInstance.Spec.DBInstanceClass = &dbInstanceClass
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceClass")
 	}
 
-	if storageType, ok := rdsInstance.Spec.OtherInstanceParams["StorageType"]; ok {
+	if storageType, ok := rdsInstance.Spec.OtherInstanceParams[storageType]; ok {
 		dbInstance.Spec.StorageType = &storageType
 	}
 
-	if allocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams["AllocatedStorage"]; ok {
+	if allocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams[allocatedStorage]; ok {
 		if i, e := strconv.ParseInt(allocatedStorage, 10, 64); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "AllocatedStorage")
 		} else {
@@ -403,7 +414,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		return fmt.Errorf(requiredParameterErrorTemplate, "AllocatedStorage")
 	}
 
-	if iops, ok := rdsInstance.Spec.OtherInstanceParams["IOPS"]; ok {
+	if iops, ok := rdsInstance.Spec.OtherInstanceParams[iops]; ok {
 		if i, e := strconv.ParseInt(iops, 10, 64); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "IOPS")
 		} else {
@@ -411,7 +422,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		}
 	}
 
-	if maxAllocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams["MaxAllocatedStorage"]; ok {
+	if maxAllocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams[maxAllocatedStorage]; ok {
 		if i, e := strconv.ParseInt(maxAllocatedStorage, 10, 64); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "MaxAllocatedStorage")
 		} else {
@@ -419,11 +430,11 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		}
 	}
 
-	if dbSubnetGroupName, ok := rdsInstance.Spec.OtherInstanceParams["DBSubnetGroupName"]; ok {
+	if dbSubnetGroupName, ok := rdsInstance.Spec.OtherInstanceParams[dbSubnetGroupName]; ok {
 		dbInstance.Spec.DBSubnetGroupName = &dbSubnetGroupName
 	}
 
-	if publiclyAccessible, ok := rdsInstance.Spec.OtherInstanceParams["PubliclyAccessible"]; ok {
+	if publiclyAccessible, ok := rdsInstance.Spec.OtherInstanceParams[publiclyAccessible]; ok {
 		if b, e := strconv.ParseBool(publiclyAccessible); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "PubliclyAccessible")
 		} else {
@@ -431,7 +442,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		}
 	}
 
-	if vpcSecurityGroupIDs, ok := rdsInstance.Spec.OtherInstanceParams["VPCSecurityGroupIDs"]; ok {
+	if vpcSecurityGroupIDs, ok := rdsInstance.Spec.OtherInstanceParams[vpcSecurityGroupIDs]; ok {
 		sl := strings.Split(vpcSecurityGroupIDs, ",")
 		var sgs []*string
 		for _, s := range sl {

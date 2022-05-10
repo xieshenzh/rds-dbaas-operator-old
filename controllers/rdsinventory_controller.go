@@ -18,15 +18,22 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 
-	v1 "k8s.io/api/core/v1"
+	apiv1 "k8s.io/api/apps/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -35,12 +42,22 @@ import (
 	dbaasv1alpha1 "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
-	ackcache "github.com/aws-controllers-k8s/runtime/pkg/runtime/cache"
 	rdstypesv2 "github.com/aws/aws-sdk-go-v2/service/rds/types"
+	opv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
 
 const (
+	awsAccessKeyID     = "AWS_ACCESS_KEY_ID"
+	awsSecretAccessKey = "AWS_SECRET_ACCESS_KEY"
+	awsRegion          = "AWS_REGION"
+	ackResourceTags    = "ACK_RESOURCE_TAGS"
+	ackLogLevel        = "ACK_LOG_LEVEL"
+
+	adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
+	fieldExportCRDFile     = "services.k8s.aws_fieldexports.yaml"
+	csvName                = "ack-rds-controller.v0.0.24"
+
 	adpotedDBInstanceLabelKey   = "rds.dbaas.redhat.com/adopted"
 	adpotedDBInstanceLabelValue = "true"
 
@@ -66,7 +83,7 @@ type RDSInventoryReconciler struct {
 //+kubebuilder:rbac:groups=rds.services.k8s.aws,resources=dbinstances,verbs=get;list;watch
 //+kubebuilder:rbac:groups=services.k8s.aws,resources=adoptedresources,verbs=get;list;create
 //+kubebuilder:rbac:groups=rds.services.k8s.aws,resources=dbinstances,verbs=get;list;watch;update
-//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get
+//TODO
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -81,28 +98,38 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err = r.Get(ctx, req.NamespacedName, &inventory); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("RDS Inventory resource not found, has been deleted")
-			return
+			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Error fetching RDS Inventory for reconcile")
-		return
+		return ctrl.Result{}, err
 	}
 
-	var roleARN *string
-	inventoryNamespace := &v1.Namespace{}
-	if e := r.Get(ctx, client.ObjectKey{Name: inventory.Namespace}, inventoryNamespace); e != nil {
+	//TODO create or update secret and configmap
+	if e := r.installCRD(ctx, &inventory, adoptedResourceCRDFile); e != nil {
 		//TODO
 	}
-	if ownerAccountID, ok := inventoryNamespace.Annotations[ackv1alpha1.AnnotationOwnerAccountID]; ok {
-		roleAccountMap := &v1.ConfigMap{}
-		if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: ackcache.ACKRoleAccountMap}, roleAccountMap); e != nil {
-			//TODO
-		}
-		if arn, ok := roleAccountMap.Data[ownerAccountID]; ok {
-			roleARN = &arn
-		}
+	if e := r.installCRD(ctx, &inventory, fieldExportCRDFile); e != nil {
+		//TODO
+	}
+	if e := r.installCatalogSource(ctx); e != nil {
+		//TODO
+	}
+	if e := r.installSubscription(ctx, &inventory); e != nil {
+		//TODO
+	}
+	if r, e := r.waitForOperator(ctx); e != nil {
+		//TODO
+	} else if !r {
+		//TODO
+	}
+	if r, e := r.waitForCSV(ctx, &inventory); e != nil {
+		//TODO
+	} else if !r {
+		//TODO
 	}
 
 	awsDBInstances := []rdstypesv2.DBInstance{}
+	//TODO retrieve all db instances
 
 	// query all db instances in cluster
 	clusterDBInstanceList := &rdsv1alpha1.DBInstanceList{}
@@ -226,6 +253,168 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return
+}
+
+func (r *RDSInventoryReconciler) installCRD(ctx context.Context, inventory *rdsdbaasv1alpha1.RDSInventory, file string) error {
+	csv, err := r.readCSVFile("")
+	if err != nil {
+		return err
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, csv, func() error {
+		if err := ctrl.SetControllerReference(inventory, csv, r.Scheme); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *RDSInventoryReconciler) readCSVFile(file string) (*apiextensionsv1.CustomResourceDefinition, error) {
+	d, err := ioutil.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	jsonData, err := yaml.ToJSON(d)
+	if err != nil {
+		return nil, err
+	}
+	csv := &apiextensionsv1.CustomResourceDefinition{}
+	if err := json.Unmarshal(jsonData, csv); err != nil {
+		return nil, err
+	}
+
+	return csv, nil
+}
+
+func (r *RDSInventoryReconciler) installCatalogSource(ctx context.Context) error {
+	catalogsource := &opv1alpha1.CatalogSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, catalogsource, func() error {
+		catalogsource.Spec = opv1alpha1.CatalogSourceSpec{
+			SourceType:  opv1alpha1.SourceTypeGrpc,
+			Image:       image,
+			DisplayName: DisplayName,
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *RDSInventoryReconciler) installSubscription(ctx context.Context, inventory *rdsdbaasv1alpha1.RDSInventory) error {
+	subscription := &opv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	catalogsource := &opv1alpha1.CatalogSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, subscription, func() error {
+		if err := ctrl.SetControllerReference(inventory, subscription, r.Scheme); err != nil {
+			return err
+		}
+		subscription.Spec = &opv1alpha1.SubscriptionSpec{
+			CatalogSource:          catalogsource.Name,
+			CatalogSourceNamespace: catalogsource.Namespace,
+			Package:                PackageName,
+			Channel:                Channel,
+			InstallPlanApproval:    opv1alpha1.ApprovalAutomatic,
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *RDSInventoryReconciler) waitForOperator(ctx context.Context) (bool, error) {
+	deployments := &apiv1.DeploymentList{}
+	opts := &client.ListOptions{
+		Namespace: r.ACKInstallNamespace,
+	}
+	if err := r.List(ctx, deployments, opts); err != nil {
+		return false, err
+	}
+
+	for _, deployment := range deployments.Items {
+		if deployment.Name == "ack-rds-controller" {
+			if deployment.Status.ReadyReplicas > 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (r *RDSInventoryReconciler) waitForCSV(ctx context.Context, inventory *rdsdbaasv1alpha1.RDSInventory) (bool, error) {
+	csv := &opv1alpha1.ClusterServiceVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      r.ACKInstallNamespace,
+			Namespace: csvName,
+		},
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(csv), csv); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if set, err := checkOwnerReferenceSet(inventory, csv, r.Scheme); err != nil {
+		return false, err
+	} else if set {
+		return true, nil
+	}
+
+	if err := ctrl.SetControllerReference(inventory, csv, r.Scheme); err != nil {
+		return false, err
+	}
+	if err := r.Update(ctx, csv); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func checkOwnerReferenceSet(inventory *rdsdbaasv1alpha1.RDSInventory, csv *opv1alpha1.ClusterServiceVersion, scheme *runtime.Scheme) (bool, error) {
+	gvk, err := apiutil.GVKForObject(inventory, scheme)
+	if err != nil {
+		return false, err
+	}
+	ref := metav1.OwnerReference{
+		APIVersion: gvk.GroupVersion().String(),
+		Kind:       gvk.Kind,
+		Name:       inventory.GetName(),
+		UID:        inventory.GetUID(),
+	}
+
+	existing := metav1.GetControllerOf(csv)
+	if existing == nil {
+		return false, nil
+	}
+
+	refGV, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return false, err
+	}
+	existingGV, err := schema.ParseGroupVersion(existing.APIVersion)
+	if err != nil {
+		return false, err
+	}
+	equal := refGV.Group == existingGV.Group && ref.Kind == existing.Kind && ref.Name == existing.Name
+	return equal, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
