@@ -203,7 +203,7 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordNotFound)
 		return
 	}
-	var secret *v1.Secret
+	secret := &v1.Secret{}
 	if e := r.Get(ctx, client.ObjectKey{Namespace: dbInstance.Spec.MasterUserPassword.Namespace,
 		Name: dbInstance.Spec.MasterUserPassword.Name}, secret); e != nil {
 		logger.Error(e, "Failed to get secret for DB Instance master password")
@@ -275,7 +275,7 @@ func (r *RDSConnectionReconciler) createOrUpdateSecret(ctx context.Context, conn
 		},
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		secret.ObjectMeta.Labels = buildLabels(connection)
+		secret.ObjectMeta.Labels = buildConnectionLabels(connection)
 		if err := ctrl.SetControllerReference(connection, secret, r.Scheme); err != nil {
 			return err
 		}
@@ -306,7 +306,7 @@ func (r *RDSConnectionReconciler) createOrUpdateConfigMap(ctx context.Context, c
 		},
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.ObjectMeta.Labels = buildLabels(connection)
+		cm.ObjectMeta.Labels = buildConnectionLabels(connection)
 		if err := ctrl.SetControllerReference(connection, cm, r.Scheme); err != nil {
 			return err
 		}
@@ -319,7 +319,7 @@ func (r *RDSConnectionReconciler) createOrUpdateConfigMap(ctx context.Context, c
 	return cm, nil
 }
 
-func buildLabels(connection *rdsdbaasv1alpha1.RDSConnection) map[string]string {
+func buildConnectionLabels(connection *rdsdbaasv1alpha1.RDSConnection) map[string]string {
 	return map[string]string{
 		"managed-by":               "rds-dbaas-operator",
 		"owner":                    connection.Name,

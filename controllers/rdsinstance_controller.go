@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -45,6 +44,10 @@ import (
 )
 
 const (
+	rdsInstanceType = "RDSInstance.dbaas.redhat.com"
+
+	instanceFinalizer = "rds.dbaas.redhat.com/instance"
+
 	engine               = "Engine"
 	engineVersion        = "EngineVersion"
 	dbInstanceIdentifier = "DBInstanceIdentifier"
@@ -56,8 +59,6 @@ const (
 	dbSubnetGroupName    = "DBSubnetGroupName"
 	publiclyAccessible   = "PubliclyAccessible"
 	vpcSecurityGroupIDs  = "VPCSecurityGroupIDs"
-
-	instanceFinalizer = "rds.dbaas.redhat.com/instance"
 
 	instanceConditionReady = "ProvisionReady"
 
@@ -452,7 +453,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		dbInstance.Spec.VPCSecurityGroupIDs = sgs
 	}
 
-	if e := setCredentials(ctx, r, r.Scheme, dbInstance, rdsInstance.Namespace, rdsInstance, rdsInstance.Kind); e != nil {
+	if e := setCredentials(ctx, r.Client, r.Scheme, dbInstance, rdsInstance.Namespace, rdsInstance, rdsInstance.Kind); e != nil {
 		return fmt.Errorf("failed to set credentials for DB instance")
 	}
 
@@ -498,12 +499,12 @@ func setCredentials(ctx context.Context, cli client.Client, scheme *runtime.Sche
 		username = generateUsername(*dbInstance.Spec.Engine)
 		secret.Data["username"] = []byte(username)
 	} else {
-		var du []byte
-		if _, e := base64.StdEncoding.Decode(du, u); e != nil {
+		if du, e := parseBase64(u); e != nil {
 			logger.Error(e, "Failed to decode username in credential secret")
 			return e
+		} else {
+			username = du
 		}
-		username = string(du)
 	}
 
 	_, pok := secret.Data["password"]
@@ -921,7 +922,7 @@ func (r *RDSInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // Code from operator-lib: https://github.com/operator-framework/operator-lib/blob/d389ad4d93a46dba047b11161b755141fc853098/handler/enqueue_annotation.go#L121
 func getOwnerInstanceRequests(object client.Object) reconcile.Request {
-	if typeString, ok := object.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == "RDSInstance.dbaas.redhat.com" {
+	if typeString, ok := object.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == rdsInstanceType {
 		namespacedNameString, ok := object.GetAnnotations()[ophandler.NamespacedNameAnnotation]
 		if !ok || strings.TrimSpace(namespacedNameString) == "" {
 			return reconcile.Request{}

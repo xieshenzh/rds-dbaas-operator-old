@@ -1,7 +1,24 @@
+/*
+Copyright 2022.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package controllers
 
 import (
 	cryptorand "crypto/rand"
+	"encoding/base64"
 	"math/big"
 	"math/rand"
 )
@@ -53,4 +70,12 @@ func generatePassword() string {
 func getRandInt(s int) int64 {
 	result, _ := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(s)))
 	return result.Int64()
+}
+
+func parseBase64(bytes []byte) (string, error) {
+	var parsed []byte
+	if _, e := base64.StdEncoding.Decode(parsed, bytes); e != nil {
+		return "", e
+	}
+	return string(parsed), nil
 }
