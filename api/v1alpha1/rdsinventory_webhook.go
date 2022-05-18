@@ -17,8 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"context"
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
@@ -26,39 +30,49 @@ import (
 // log is for logging in this package.
 var rdsinventorylog = logf.Log.WithName("rdsinventory-resource")
 
+var inventoryWebhookApiClient client.Client
+
 func (r *RDSInventory) SetupWebhookWithManager(mgr ctrl.Manager) error {
+	if inventoryWebhookApiClient == nil {
+		inventoryWebhookApiClient = mgr.GetClient()
+	}
+
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).
 		Complete()
 }
 
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-dbaas-redhat-com-v1alpha1-rdsinventory,mutating=false,failurePolicy=fail,sideEffects=None,groups=dbaas.redhat.com,resources=rdsinventories,verbs=create;update,versions=v1alpha1,name=vrdsinventory.kb.io,admissionReviewVersions=v1
+//+kubebuilder:webhook:path=/validate-dbaas-redhat-com-v1alpha1-rdsinventory,mutating=false,failurePolicy=fail,sideEffects=None,groups=dbaas.redhat.com,resources=rdsinventories,verbs=create,versions=v1alpha1,name=vrdsinventory.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &RDSInventory{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (r *RDSInventory) ValidateCreate() error {
 	rdsinventorylog.Info("validate create", "name", r.Name)
-
-	// TODO(user): fill in your validation logic upon object creation.
-	return nil
+	return r.verifyInventoryCreated()
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
 func (r *RDSInventory) ValidateUpdate(old runtime.Object) error {
 	rdsinventorylog.Info("validate update", "name", r.Name)
-
-	// TODO(user): fill in your validation logic upon object update.
 	return nil
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
 func (r *RDSInventory) ValidateDelete() error {
 	rdsinventorylog.Info("validate delete", "name", r.Name)
+	return nil
+}
 
-	// TODO(user): fill in your validation logic upon object deletion.
+func (r *RDSInventory) verifyInventoryCreated() error {
+	inventoryList := &RDSInventoryList{}
+	if err := inventoryWebhookApiClient.List(context.TODO(), inventoryList); err != nil {
+		return err
+	}
+
+	if len(inventoryList.Items) > 0 {
+		return fmt.Errorf("only one Inventory for RDS can exist in a cluster, there is already an Inventory %s created", inventoryList.Items[0].Name)
+	}
+
 	return nil
 }

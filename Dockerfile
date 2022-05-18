@@ -1,5 +1,14 @@
 # Build the manager binary
-FROM golang:1.17 as builder
+FROM registry.access.redhat.com/ubi8:8.5 AS builder
+
+# Set go version
+ARG RUNTIME_VERSION=1.17.10
+
+RUN curl -fsSLo /tmp/go.tgz https://golang.org/dl/go${RUNTIME_VERSION}.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf /tmp/go.tgz && \
+    ln -s ../go/bin/go /usr/local/bin/go && \
+    rm /tmp/go.tgz && \
+    go version
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -14,14 +23,19 @@ COPY main.go main.go
 COPY api/ api/
 COPY controllers/ controllers/
 
+# Copy the RDS CRDs
+COPY rds/config/common/bases/ crds/
+
 # Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager main.go
 
-# Use distroless as minimal base image to package the manager binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# Build the operator image
+FROM registry.access.redhat.com/ubi8-minimal:8.5
+
+COPY LICENSE /licenses/LICENSE
 WORKDIR /
 COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/crds/* .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

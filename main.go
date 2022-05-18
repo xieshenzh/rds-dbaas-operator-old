@@ -22,6 +22,8 @@ import (
 	"os"
 	"time"
 
+	"go.uber.org/zap/zapcore"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -65,14 +67,24 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var syncPeriod time.Duration
+	var logLevel string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.DurationVar(&syncPeriod, "sync-period-min", 180*time.Minute, "The minimum interval at which watched resources are reconciled (e.g. 30 minutes)")
+	flag.StringVar(&logLevel, "log-level", "info", "Log level.")
+
+	var level zapcore.Level
+	if err := level.UnmarshalText([]byte(logLevel)); err != nil {
+		//default to info level
+		level = zapcore.InfoLevel
+	}
+
 	opts := zap.Options{
 		Development: true,
+		Level:       level,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -149,9 +161,12 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DBaaSProvider")
 		os.Exit(1)
 	}
-	if err = (&rdsv1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "RDSInventory")
-		os.Exit(1)
+
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err = (&rdsv1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "RDSInventory")
+			os.Exit(1)
+		}
 	}
 	//+kubebuilder:scaffold:builder
 

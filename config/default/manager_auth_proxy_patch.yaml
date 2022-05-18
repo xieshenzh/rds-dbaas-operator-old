@@ -10,7 +10,7 @@ spec:
     spec:
       containers:
       - name: kube-rbac-proxy
-        image: gcr.io/kubebuilder/kube-rbac-proxy:v0.8.0
+        image: registry.redhat.io/openshift4/ose-kube-rbac-proxy:v4.8
         args:
         - "--secure-listen-address=0.0.0.0:8443"
         - "--upstream=http://127.0.0.1:8080/"
@@ -27,6 +27,12 @@ spec:
           requests:
             cpu: 5m
             memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
       - name: manager
         args:
         - "--health-probe-bind-address=:8081"
