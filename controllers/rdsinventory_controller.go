@@ -26,6 +26,7 @@ import (
 	"k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -65,26 +66,43 @@ const (
 	secretName    = "ack-user-secrets"
 	configmapName = "ack-user-config"
 
-	adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
-	adoptedResourceCRDName = "adoptedresources.services.k8s.aws"
-	catalogName            = "rds-catalogsource"
-	catalogNamespace       = "openshift-marketplace"
-	subscriptionName       = "rds-subscription"
-	subscriptionPackage    = "ack-rds-controller"
-	subscriptionChannel    = "alpha"
-	deploymentName         = "ack-rds-controller"
-	csvName                = "ack-rds-controller.v0.0.24"
+	//adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
+	//adoptedResourceCRDName = "adoptedresources.services.k8s.aws"
+	catalogName         = "rds-catalogsource"
+	catalogNamespace    = "openshift-marketplace"
+	subscriptionName    = "rds-subscription"
+	subscriptionPackage = "ack-rds-controller"
+	subscriptionChannel = "alpha"
+	deploymentName      = "ack-rds-controller"
+	csvName             = "ack-rds-controller.v0.0.24"
 
 	adpotedDBInstanceLabelKey   = "rds.dbaas.redhat.com/adopted"
 	adpotedDBInstanceLabelValue = "true"
 
 	inventoryConditionReady = "SpecSynced"
 
-	inventoryStatusMessageSyncOK              = "SyncOK"
-	inventoryStatusMessageInputError          = "InputError"
-	inventoryStatusMessageBackendError        = "BackendError"
-	inventoryStatusMessageEndpointUnreachable = "EndpointUnreachable"
-	inventoryStatusMessageAuthenticationError = "AuthenticationError"
+	inventoryStatusReasonSyncOK       = "SyncOK"
+	inventoryStatusReasonUpdating     = "Updating"
+	inventoryStatusReasonDeleting     = "Deleting"
+	inventoryStatusReasonInputError   = "InputError"
+	inventoryStatusReasonBackendError = "BackendError"
+	inventoryStatusReasonNotFound     = "NotFound"
+
+	inventoryStatusMessageUpdating            = "Updating Inventory"
+	inventoryStatusMessageUpdateError         = "Failed to update Inventory"
+	inventoryStatusMessageDeleting            = "Deleting Inventory"
+	inventoryStatusMessageInstalling          = "Installing RDS controller"
+	inventoryStatusMessageGetInstancesError   = "Failed to get Instances"
+	inventoryStatusMessageAdoptInstanceError  = "Failed to adopt DB Instance"
+	inventoryStatusMessageUpdateInstanceError = "Failed to update DB Instance"
+	inventoryStatusMessageGetError            = "Failed to get %s"
+	inventoryStatusMessageDeleteError         = "Failed to delete %s"
+	inventoryStatusMessageCreateOrUpdateError = "Failed to create or update %s"
+	inventoryStatusMessageInstallError        = "Failed to create %s for RDS controller"
+	inventoryStatusMessageVerifyInstallError  = "Failed to verify %s for RDS controller"
+
+	requiredCredentialErrorTemplate = "required credential %s is missing"
+	invalidCredentialErrorTemplate  = "credential %s is invalid"
 )
 
 // RDSInventoryReconciler reconciles a RDSInventory object
@@ -114,7 +132,48 @@ type RDSInventoryReconciler struct {
 func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	logger := log.FromContext(ctx)
 
+	var syncStatus, syncStatusReason, syncStatusMessage string
+
 	var inventory rdsdbaasv1alpha1.RDSInventory
+
+	returnUpdating := func() {
+		result = ctrl.Result{Requeue: true}
+		err = nil
+		syncStatus = string(metav1.ConditionUnknown)
+		syncStatusReason = inventoryStatusReasonUpdating
+		syncStatusMessage = inventoryStatusMessageUpdating
+	}
+
+	returnError := func(e error, reason, message string) {
+		result = ctrl.Result{}
+		err = e
+		syncStatus = string(metav1.ConditionFalse)
+		syncStatusReason = reason
+		syncStatusMessage = message
+	}
+
+	returnNotReady := func(reason, message string) {
+		result = ctrl.Result{}
+		err = nil
+		syncStatus = string(metav1.ConditionFalse)
+		syncStatusReason = reason
+		syncStatusMessage = message
+	}
+
+	returnRequeue := func(reason, message string) {
+		result = ctrl.Result{Requeue: true}
+		err = nil
+		syncStatus = string(metav1.ConditionFalse)
+		syncStatusReason = reason
+		syncStatusMessage = message
+	}
+
+	returnReady := func() {
+		result = ctrl.Result{}
+		err = nil
+		syncStatus = string(metav1.ConditionTrue)
+		syncStatusReason = inventoryStatusReasonSyncOK
+	}
 
 	checkFinalizer := func() bool {
 		if inventory.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -123,15 +182,15 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				if e := r.Update(ctx, &inventory); e != nil {
 					if errors.IsConflict(e) {
 						logger.Info("Inventory modified, retry reconciling")
-						//TODO
+						returnUpdating()
 						return true
 					}
 					logger.Error(e, "Failed to add finalizer to Inventory")
-					//TODO
+					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateError)
 					return true
 				}
 				logger.Info("Finalizer added to Inventory")
-				//TODO
+				returnNotReady(inventoryStatusReasonUpdating, inventoryStatusMessageUpdating)
 				return true
 			}
 		} else {
@@ -139,80 +198,116 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				secret := &v1.Secret{}
 				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: secretName}, secret); e != nil {
 					if !errors.IsNotFound(e) {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "Secret"))
+						return true
 					}
 				} else {
 					if e := r.Delete(ctx, secret); e != nil {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "Secret"))
+						return true
 					}
-					//TODO
+					returnUpdating()
+					return true
 				}
 				configmap := &v1.ConfigMap{}
 				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: configmapName}, configmap); e != nil {
 					if !errors.IsNotFound(e) {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "ConfigMap"))
+						return true
 					}
 				} else {
 					if e := r.Delete(ctx, configmap); e != nil {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "ConfigMap"))
+						return true
 					}
-					//TODO
+					returnUpdating()
+					return true
 				}
-				crd := &apiextensionsv1.CustomResourceDefinition{}
-				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crd); e != nil {
-					if !errors.IsNotFound(e) {
-						//TODO
-					}
-				} else {
-					if e := r.Delete(ctx, crd); e != nil {
-						//TODO
-					}
-					//TODO
-				}
+				//crd := &apiextensionsv1.CustomResourceDefinition{}
+				//if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crd); e != nil {
+				//	if !errors.IsNotFound(e) {
+				//		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
+				//		return true
+				//	}
+				//} else {
+				//	if e := r.Delete(ctx, crd); e != nil {
+				//		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
+				//		return true
+				//	}
+				//	returnUpdating()
+				//	return true
+				//}
 				subscription := &opv1alpha1.Subscription{}
 				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: subscriptionName}, subscription); e != nil {
 					if !errors.IsNotFound(e) {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "Subscription"))
+						return true
 					}
 				} else {
 					if e := r.Delete(ctx, subscription); e != nil {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "Subscription"))
+						return true
 					}
-					//TODO
+					returnUpdating()
+					return true
 				}
 				csv := &opv1alpha1.ClusterServiceVersion{}
 				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: csvName}, csv); e != nil {
 					if !errors.IsNotFound(e) {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CSV"))
+						return true
 					}
 				} else {
 					if e := r.Delete(ctx, csv); e != nil {
-						//TODO
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CSV"))
+						return true
 					}
-					//TODO
+					returnUpdating()
+					return true
 				}
 
 				controllerutil.RemoveFinalizer(&inventory, inventoryFinalizer)
 				if e := r.Update(ctx, &inventory); e != nil {
 					if errors.IsConflict(e) {
 						logger.Info("Inventory modified, retry reconciling")
-						//TODO
+						returnUpdating()
 						return true
 					}
 					logger.Error(e, "Failed to remove finalizer from Inventory")
-					//TODO
+					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateError)
 					return true
 				}
-				//TODO
+				returnNotReady(inventoryStatusReasonUpdating, inventoryStatusMessageUpdating)
 				return true
 			}
 
 			// Stop reconciliation as the item is being deleted
-			//TODO
+			returnNotReady(inventoryStatusReasonDeleting, inventoryStatusMessageDeleting)
 			return true
 		}
 
 		return false
+	}
+
+	updateInventoryReadyCondition := func() {
+		condition := metav1.Condition{
+			Type:    inventoryConditionReady,
+			Status:  metav1.ConditionStatus(syncStatus),
+			Reason:  syncStatusReason,
+			Message: syncStatusMessage,
+		}
+		apimeta.SetStatusCondition(&inventory.Status.Conditions, condition)
+		if e := r.Status().Update(ctx, &inventory); e != nil {
+			if errors.IsConflict(e) {
+				logger.Info("Inventory modified, retry reconciling")
+				result = ctrl.Result{Requeue: true}
+			} else {
+				logger.Error(e, "Failed to update Inventory status")
+				if err == nil {
+					err = e
+				}
+			}
+		}
 	}
 
 	if err = r.Get(ctx, req.NamespacedName, &inventory); err != nil {
@@ -224,6 +319,8 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	defer updateInventoryReadyCondition()
+
 	if checkFinalizer() {
 		return
 	}
@@ -233,61 +330,88 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Name: inventory.Spec.CredentialsRef.Name}, credentialsRef); e != nil {
 		logger.Error(e, "Failed to get credentials reference for Inventory")
 		if errors.IsNotFound(e) {
-			//TODO
+			returnError(e, inventoryStatusReasonNotFound, fmt.Sprintf(inventoryStatusMessageGetError, "Credential"))
 		}
-		//TODO
+		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "Credential"))
+		return
 	}
 	var accessKey, secretKey, region string
 	if ak, ok := credentialsRef.Data[awsAccessKeyID]; !ok || len(ak) == 0 {
-		//TODO
+		e := fmt.Errorf(requiredCredentialErrorTemplate, awsAccessKeyID)
+		returnError(e, inventoryStatusReasonInputError, e.Error())
+		return
 	} else {
 		if key, e := parseBase64(ak); e != nil {
-			//TODO
+			e := fmt.Errorf(invalidCredentialErrorTemplate, awsAccessKeyID)
+			returnError(e, inventoryStatusReasonInputError, e.Error())
+			return
 		} else {
 			accessKey = key
 		}
 	}
 	if sk, ok := credentialsRef.Data[awsSecretAccessKey]; !ok || len(sk) == 0 {
-		//TODO
+		e := fmt.Errorf(requiredCredentialErrorTemplate, awsSecretAccessKey)
+		returnError(e, inventoryStatusReasonInputError, e.Error())
+		return
 	} else {
 		if key, e := parseBase64(sk); e != nil {
-			//TODO
+			e := fmt.Errorf(invalidCredentialErrorTemplate, awsSecretAccessKey)
+			returnError(e, inventoryStatusReasonInputError, e.Error())
+			return
 		} else {
 			secretKey = key
 		}
 	}
 	if r, ok := credentialsRef.Data[awsRegion]; !ok || len(r) == 0 {
-		//TODO
+		e := fmt.Errorf(requiredCredentialErrorTemplate, awsRegion)
+		returnError(e, inventoryStatusReasonInputError, e.Error())
+		return
 	} else {
 		if rg, e := parseBase64(r); e != nil {
-			//TODO
+			e := fmt.Errorf(invalidCredentialErrorTemplate, awsRegion)
+			returnError(e, inventoryStatusReasonInputError, e.Error())
+			return
 		} else {
 			region = rg
 		}
 	}
 
 	if e := r.createOrUpdateSecret(ctx, &inventory, credentialsRef); e != nil {
-		//TODO
+		logger.Error(e, "Failed to create or update secret for Inventory")
+		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageCreateOrUpdateError, "Secret"))
+		return
 	}
 	if e := r.createOrUpdateConfigMap(ctx, &inventory, credentialsRef); e != nil {
-		//TODO
+		logger.Error(e, "Failed to create or update configmap for Inventory")
+		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageCreateOrUpdateError, "ConfigMap"))
+		return
 	}
 
-	if e := r.installCRD(ctx, &inventory, adoptedResourceCRDFile); e != nil {
-		//TODO
-	}
+	//if e := r.installCRD(ctx, &inventory, adoptedResourceCRDFile); e != nil {
+	//	logger.Error(e, "Failed to create CRD for RDS controller installation")
+	//	returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
+	//	return
+	//}
 	if e := r.installSubscription(ctx, &inventory); e != nil {
-		//TODO
+		logger.Error(e, "Failed to create Subscription for RDS controller installation")
+		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "Subscription"))
+		return
 	}
 	if r, e := r.waitForOperator(ctx); e != nil {
-		//TODO
+		logger.Error(e, "Failed to check operator Deployment for RDS controller installation")
+		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageVerifyInstallError, "Operator Deployment"))
+		return
 	} else if !r {
-		//TODO
+		returnRequeue(inventoryStatusReasonUpdating, inventoryStatusMessageInstalling)
+		return
 	}
 	if r, e := r.waitForCSV(ctx, &inventory); e != nil {
-		//TODO
+		logger.Error(e, "Failed to check CSV for RDS controller installation")
+		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageVerifyInstallError, "CSV"))
+		return
 	} else if !r {
-		//TODO
+		returnRequeue(inventoryStatusReasonUpdating, inventoryStatusMessageInstalling)
+		return
 	}
 
 	var awsDBInstances []rdstypesv2.DBInstance
@@ -298,17 +422,21 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	paginator := rds.NewDescribeDBInstancesPaginator(awsClient, nil)
 	for paginator.HasMorePages() {
 		if output, e := paginator.NextPage(ctx); e != nil {
-			//TODO
+			logger.Error(e, "Failed to read DB Instances of the Inventory from AWS")
+			returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
+			return
 		} else if output != nil {
 			awsDBInstances = append(awsDBInstances, output.DBInstances...)
 		}
 	}
 
-	if awsDBInstances != nil && len(awsDBInstances) > 0 {
+	if len(awsDBInstances) > 0 {
 		// query all db instances in cluster
 		clusterDBInstanceList := &rdsv1alpha1.DBInstanceList{}
 		if e := r.List(ctx, clusterDBInstanceList, client.InNamespace(inventory.Namespace)); e != nil {
-			//TODO
+			logger.Error(e, "Failed to read DB Instances of the Inventory in the cluster")
+			returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
+			return
 		}
 
 		dbInstanceMap := make(map[string]rdsv1alpha1.DBInstance, len(clusterDBInstanceList.Items))
@@ -318,7 +446,9 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 		adoptedResourceList := &ackv1alpha1.AdoptedResourceList{}
 		if e := r.List(ctx, adoptedResourceList, client.InNamespace(inventory.Namespace)); e != nil {
-			//TODO
+			logger.Error(e, "Failed to read adopted DB Instances of the Inventory in the cluster")
+			returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
+			return
 		}
 		adoptedDBInstanceMap := make(map[string]ackv1alpha1.AdoptedResource, len(adoptedResourceList.Items))
 		for _, adoptedDBInstance := range adoptedResourceList.Items {
@@ -370,7 +500,9 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 						},
 					}
 					if e := r.Create(ctx, adoptedDBInstance); e != nil {
-						//TODO
+						logger.Error(e, "Failed to create adopted DB Instance in the cluster")
+						returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageAdoptInstanceError)
+						return
 					}
 				}
 			}
@@ -380,26 +512,35 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	adoptedDBInstanceList := &rdsv1alpha1.DBInstanceList{}
 	if e := r.List(ctx, adoptedDBInstanceList, client.InNamespace(inventory.Namespace),
 		client.MatchingLabels(map[string]string{adpotedDBInstanceLabelKey: adpotedDBInstanceLabelValue})); e != nil {
-		//TODO
+		logger.Error(e, "Failed to read adopted DB Instances of the Inventory that are created by the operator")
+		returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
+		return
 	}
 
 	for _, adoptedDBInstance := range adoptedDBInstanceList.Items {
 		if adoptedDBInstance.Spec.MasterUsername == nil || adoptedDBInstance.Spec.MasterUserPassword == nil {
 			if e := setCredentials(ctx, r.Client, r.Scheme, &adoptedDBInstance, inventory.Namespace, nil, ""); e != nil {
-				//TODO
+				returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
+				return
 			}
 			if e := r.Update(ctx, &adoptedDBInstance); e != nil {
 				if errors.IsConflict(e) {
-					//TODO
+					logger.Info("Adopted DB Instance modified, retry reconciling")
+					returnUpdating()
+					return
 				}
-				//TODO
+				logger.Error(e, "Failed to update credentials of the adopted DB Instance", "DB Instance", adoptedDBInstance)
+				returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
+				return
 			}
 		}
 	}
 
 	dbInstanceList := &rdsv1alpha1.DBInstanceList{}
 	if e := r.List(ctx, dbInstanceList, client.InNamespace(inventory.Namespace)); e != nil {
-		//TODO
+		logger.Error(e, "Failed to read DB Instances of the Inventory in the cluster")
+		returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
+		return
 	}
 
 	var instances []dbaasv1alpha1.Instance
@@ -413,19 +554,18 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	inventory.Status.Instances = instances
 
-	//TODO phase
-
 	if e := r.Status().Update(ctx, &inventory); e != nil {
 		if errors.IsConflict(e) {
 			logger.Info("Inventory modified, retry reconciling")
-			//TODO
+			returnUpdating()
 			return
 		}
 		logger.Error(e, "Failed to update Inventory status")
-		//TODO
+		returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateError)
 		return
 	}
 
+	returnReady()
 	return
 }
 

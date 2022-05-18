@@ -56,8 +56,8 @@ const (
 
 	connectionStatusMessageUpdateError       = "Failed to update Connection"
 	connectionStatusMessageUpdating          = "Updating Connection"
-	connectionStatusMessageSecret            = "Failed to create or update secret"
-	connectionStatusMessageConfigMap         = "Failed to create or update configmap"
+	connectionStatusMessageSecretError       = "Failed to create or update secret"
+	connectionStatusMessageConfigMapError    = "Failed to create or update configmap"
 	connectionStatusMessageInstanceNotFound  = "Instance not found"
 	connectionStatusMessageInstanceNotReady  = "Instance not ready"
 	connectionStatusMessageGetInstanceError  = "Failed to get Instance"
@@ -236,15 +236,15 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	userSecret, e := r.createOrUpdateSecret(ctx, &connection, secret, &dbInstance)
 	if e != nil {
-		logger.Error(e, "Failed to create or update secret for connection")
-		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageSecret)
+		logger.Error(e, "Failed to create or update secret for Connection")
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageSecretError)
 		return
 	}
 
 	dbConfigMap, e := r.createOrUpdateConfigMap(ctx, &connection, &dbInstance)
 	if e != nil {
-		logger.Error(e, "Failed to create or update configmap for connection")
-		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageConfigMap)
+		logger.Error(e, "Failed to create or update configmap for Connection")
+		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageConfigMapError)
 		return
 	}
 
