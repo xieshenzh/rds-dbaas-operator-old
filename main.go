@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -119,8 +118,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg := mgr.GetConfig()
-	clientSet, err := kubernetes.NewForConfig(cfg)
+	//cfg := mgr.GetConfig()
+	//clientSet, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create clientset")
 		os.Exit(1)
@@ -153,21 +152,21 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RDSInstance")
 		os.Exit(1)
 	}
-	if err = (&controllers.DBaaSProviderReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Clientset: clientSet,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DBaaSProvider")
-		os.Exit(1)
-	}
+	//if err = (&controllers.DBaaSProviderReconciler{
+	//	Client:    mgr.GetClient(),
+	//	Scheme:    mgr.GetScheme(),
+	//	Clientset: clientSet,
+	//}).SetupWithManager(mgr); err != nil {
+	//	setupLog.Error(err, "unable to create controller", "controller", "DBaaSProvider")
+	//	os.Exit(1)
+	//}
 
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err = (&rdsv1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "RDSInventory")
-			os.Exit(1)
-		}
-	}
+	//if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+	//	if err = (&rdsv1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr); err != nil {
+	//		setupLog.Error(err, "unable to create webhook", "webhook", "RDSInventory")
+	//		os.Exit(1)
+	//	}
+	//}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

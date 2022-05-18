@@ -97,6 +97,8 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	var inventory rdsdbaasv1alpha1.RDSInventory
 	var dbInstance rdsv1alpha1.DBInstance
 
+	var masterUserSecret v1.Secret
+
 	returnError := func(e error, reason, message string) {
 		result = ctrl.Result{}
 		err = e
@@ -141,6 +143,106 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	checkDBInstanceStatus := func() bool {
+		var instanceName *string
+		for _, ins := range inventory.Status.Instances {
+			if ins.InstanceID == connection.Spec.InstanceID {
+				instanceName = &ins.Name
+				break
+			}
+		}
+		if instanceName == nil {
+			e := fmt.Errorf("instance %s not found", connection.Spec.InstanceID)
+			logger.Error(e, "DB Instance not found from Inventory")
+			returnError(e, connectionStatusReasonNotFound, connectionStatusMessageInstanceNotFound)
+			return true
+		}
+
+		if e := r.Get(ctx, client.ObjectKey{Namespace: connection.Spec.InventoryRef.Namespace,
+			Name: *instanceName}, &dbInstance); e != nil {
+			logger.Error(e, "Failed to get DB Instance")
+			returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetInstanceError)
+			return true
+		}
+		if *dbInstance.Status.DBInstanceStatus != "available" {
+			e := fmt.Errorf("instance %s not ready", connection.Spec.InstanceID)
+			logger.Error(e, "DB Instance not ready")
+			returnError(e, connectionStatusReasonUnreachable, connectionStatusMessageInstanceNotReady)
+			return true
+		}
+		return false
+	}
+
+	checkDBConnectionStatus := func() bool {
+		if dbInstance.Spec.MasterUserPassword == nil {
+			e := fmt.Errorf("instance %s master password not set", connection.Spec.InstanceID)
+			logger.Error(e, "DB Instance master password not set")
+			returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordNotFound)
+			return true
+		}
+
+		if e := r.Get(ctx, client.ObjectKey{Namespace: dbInstance.Spec.MasterUserPassword.Namespace,
+			Name: dbInstance.Spec.MasterUserPassword.Name}, &masterUserSecret); e != nil {
+			logger.Error(e, "Failed to get secret for DB Instance master password")
+			if errors.IsNotFound(e) {
+				returnError(e, connectionStatusReasonNotFound, connectionStatusMessageGetPasswordError)
+			} else {
+				returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetPasswordError)
+			}
+			return true
+		}
+		if v, ok := masterUserSecret.Data[dbInstance.Spec.MasterUserPassword.Key]; !ok || len(v) == 0 {
+			e := fmt.Errorf("instance %s master password key not set", connection.Spec.InstanceID)
+			logger.Error(e, "DB Instance master password key not set")
+			returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordInvalid)
+			return true
+		}
+		if dbInstance.Spec.MasterUsername == nil {
+			e := fmt.Errorf("instance %s master username not set", connection.Spec.InstanceID)
+			logger.Error(e, "DB Instance master username not set")
+			returnError(e, connectionStatusReasonInputError, connectionStatusMessageUsernameNotFound)
+			return true
+		}
+
+		if dbInstance.Status.Endpoint == nil {
+			e := fmt.Errorf("instance %s endpoint not found", connection.Spec.InstanceID)
+			logger.Error(e, "DB Instance endpoint not found")
+			returnError(e, connectionStatusReasonUnreachable, connectionStatusMessageEndpointNotFound)
+			return true
+		}
+		return false
+	}
+
+	syncConnectionStatus := func() bool {
+		userSecret, e := r.createOrUpdateSecret(ctx, &connection, &masterUserSecret, &dbInstance)
+		if e != nil {
+			logger.Error(e, "Failed to create or update secret for Connection")
+			returnError(e, connectionStatusReasonBackendError, connectionStatusMessageSecretError)
+			return true
+		}
+
+		dbConfigMap, e := r.createOrUpdateConfigMap(ctx, &connection, &dbInstance)
+		if e != nil {
+			logger.Error(e, "Failed to create or update configmap for Connection")
+			returnError(e, connectionStatusReasonBackendError, connectionStatusMessageConfigMapError)
+			return true
+		}
+
+		connection.Status.CredentialsRef = &v1.LocalObjectReference{Name: userSecret.Name}
+		connection.Status.ConnectionInfoRef = &v1.LocalObjectReference{Name: dbConfigMap.Name}
+		if e := r.Status().Update(ctx, &connection); e != nil {
+			if errors.IsConflict(e) {
+				logger.Info("Connection modified, retry reconciling")
+				returnRequeue(connectionStatusReasonUpdating, connectionStatusMessageUpdating)
+				return true
+			}
+			logger.Error(e, "Failed to update Connection status")
+			returnError(e, connectionStatusReasonBackendError, connectionStatusMessageUpdateError)
+			return true
+		}
+		return false
+	}
+
 	if err = r.Get(ctx, req.NamespacedName, &connection); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("RDS Connection resource not found, has been deleted")
@@ -170,94 +272,15 @@ func (r *RDSConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return
 	}
 
-	var instanceName *string
-	for _, ins := range inventory.Status.Instances {
-		if ins.InstanceID == connection.Spec.InstanceID {
-			instanceName = &ins.Name
-			break
-		}
-	}
-	if instanceName == nil {
-		e := fmt.Errorf("instance %s not found", connection.Spec.InstanceID)
-		logger.Error(e, "DB Instance not found from Inventory")
-		returnError(e, connectionStatusReasonNotFound, connectionStatusMessageInstanceNotFound)
+	if checkDBInstanceStatus() {
 		return
 	}
 
-	if e := r.Get(ctx, client.ObjectKey{Namespace: connection.Spec.InventoryRef.Namespace,
-		Name: *instanceName}, &dbInstance); e != nil {
-		logger.Error(e, "Failed to get DB Instance")
-		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetInstanceError)
-		return
-	}
-	if *dbInstance.Status.DBInstanceStatus != "available" {
-		e := fmt.Errorf("instance %s not ready", connection.Spec.InstanceID)
-		logger.Error(e, "DB Instance not ready")
-		returnError(e, connectionStatusReasonUnreachable, connectionStatusMessageInstanceNotReady)
+	if checkDBConnectionStatus() {
 		return
 	}
 
-	if dbInstance.Spec.MasterUserPassword == nil {
-		e := fmt.Errorf("instance %s master password not set", connection.Spec.InstanceID)
-		logger.Error(e, "DB Instance master password not set")
-		returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordNotFound)
-		return
-	}
-	secret := &v1.Secret{}
-	if e := r.Get(ctx, client.ObjectKey{Namespace: dbInstance.Spec.MasterUserPassword.Namespace,
-		Name: dbInstance.Spec.MasterUserPassword.Name}, secret); e != nil {
-		logger.Error(e, "Failed to get secret for DB Instance master password")
-		if errors.IsNotFound(e) {
-			returnError(e, connectionStatusReasonNotFound, connectionStatusMessageGetPasswordError)
-		} else {
-			returnError(e, connectionStatusReasonBackendError, connectionStatusMessageGetPasswordError)
-		}
-		return
-	}
-	if v, ok := secret.Data[dbInstance.Spec.MasterUserPassword.Key]; !ok || len(v) == 0 {
-		e := fmt.Errorf("instance %s master password key not set", connection.Spec.InstanceID)
-		logger.Error(e, "DB Instance master password key not set")
-		returnError(e, connectionStatusReasonInputError, connectionStatusMessagePasswordInvalid)
-		return
-	}
-	if dbInstance.Spec.MasterUsername == nil {
-		e := fmt.Errorf("instance %s master username not set", connection.Spec.InstanceID)
-		logger.Error(e, "DB Instance master username not set")
-		returnError(e, connectionStatusReasonInputError, connectionStatusMessageUsernameNotFound)
-		return
-	}
-
-	if dbInstance.Status.Endpoint == nil {
-		e := fmt.Errorf("instance %s endpoint not found", connection.Spec.InstanceID)
-		logger.Error(e, "DB Instance endpoint not found")
-		returnError(e, connectionStatusReasonUnreachable, connectionStatusMessageEndpointNotFound)
-		return
-	}
-
-	userSecret, e := r.createOrUpdateSecret(ctx, &connection, secret, &dbInstance)
-	if e != nil {
-		logger.Error(e, "Failed to create or update secret for Connection")
-		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageSecretError)
-		return
-	}
-
-	dbConfigMap, e := r.createOrUpdateConfigMap(ctx, &connection, &dbInstance)
-	if e != nil {
-		logger.Error(e, "Failed to create or update configmap for Connection")
-		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageConfigMapError)
-		return
-	}
-
-	connection.Status.CredentialsRef = &v1.LocalObjectReference{Name: userSecret.Name}
-	connection.Status.ConnectionInfoRef = &v1.LocalObjectReference{Name: dbConfigMap.Name}
-	if e := r.Status().Update(ctx, &connection); e != nil {
-		if errors.IsConflict(e) {
-			logger.Info("Connection modified, retry reconciling")
-			returnRequeue(connectionStatusReasonUpdating, connectionStatusMessageUpdating)
-			return
-		}
-		logger.Error(e, "Failed to update Connection status")
-		returnError(e, connectionStatusReasonBackendError, connectionStatusMessageUpdateError)
+	if syncConnectionStatus() {
 		return
 	}
 

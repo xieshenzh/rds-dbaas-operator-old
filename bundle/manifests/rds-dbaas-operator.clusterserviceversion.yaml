@@ -34,7 +34,7 @@ metadata:
     containerImage: quay.io/xiezhang/rds-dbaas-operator:v0.1.0
     description: RHODA Provider Operator for Amazon RDS.
     operatorframework.io/suggested-namespace: openshift-dbaas-operator
-    operators.operatorframework.io/builder: operator-sdk-v1.18.0+git
+    operators.operatorframework.io/builder: operator-sdk-v1.19.0+git
     operators.operatorframework.io/internal-objects: '["rdsconnections.dbaas.redhat.com","rdsinstances.dbaas.redhat.com","rdsinventories.dbaas.redhat.com"]'
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v3
     repository: https://github.com/RHEcosystemAppEng/rds-dbaas-operator
@@ -260,7 +260,9 @@ spec:
           - create
         serviceAccountName: rds-dbaas-operator-controller-manager
       deployments:
-      - name: rds-dbaas-operator-controller-manager
+      - label:
+          control-plane: controller-manager
+        name: rds-dbaas-operator-controller-manager
         spec:
           replicas: 1
           selector:
