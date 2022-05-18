@@ -1,9 +1,20 @@
+CONTAINER_ENGINE?=docker
+
 # VERSION defines the project version for the bundle.
 # Update this value when you upgrade the version of your project.
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.0.1
+VERSION ?= 0.1.0
+
+RDS_VERSION ?= 0.0.24
+
+# QUAY_ORG indicates the organization that docker images will be build for & pushed to
+# CHANGE THIS TO YOUR OWN QUAY USERNAME FOR DEV/TESTING/PUSHING
+ORG ?= xiezhang7
+
+# CATALOG_BASE_IMG defines an existing catalog version to build on & add bundles to
+#CATALOG_BASE_IMG ?= quay.io/$(ORG)/rds-dbaas-operator-catalog:v$(VERSION)
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -29,11 +40,15 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
 # redhat.com/rds-dbaas-operator-bundle:$VERSION and redhat.com/rds-dbaas-operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= redhat.com/rds-dbaas-operator
+IMAGE_TAG_BASE ?= quay.io/$(ORG)/rds-dbaas-operator
+
+RDS_IMAGE_TAG_BASE ?= quay.io/$(ORG)/rds
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
 BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
+
+RDS_BUNDLE_IMG ?= $(RDS_IMAGE_TAG_BASE)-bundle:v$(RDS_VERSION)
 
 # BUNDLE_GEN_FLAGS are the flags passed to the operator-sdk generate bundle command
 BUNDLE_GEN_FLAGS ?= -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
@@ -47,7 +62,7 @@ ifeq ($(USE_IMAGE_DIGESTS), true)
 endif
 
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= $(IMAGE_TAG_BASE):v$(VERSION)
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.23
 
@@ -108,6 +123,8 @@ test: manifests generate fmt vet envtest ## Run tests.
 
 ##@ Build
 
+release-build: build generate bundle docker-build bundle-build bundle-push rds-bundle rds-bundle-build rds-bundle-push catalog-build ## Build operator docker, bundle, catalog images
+
 .PHONY: build
 build: generate fmt vet ## Build manager binary.
 	go build -o bin/manager main.go
@@ -118,13 +135,15 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: docker-build
 docker-build: test ## Build docker image with the manager.
-	docker build -t ${IMG} .
+	$(CONTAINER_ENGINE) build -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
-	docker push ${IMG}
+	$(CONTAINER_ENGINE) push ${IMG}
 
 ##@ Deployment
+
+release-push: docker-push bundle-push rds-bundle-push catalog-push ## Push operator docker, bundle, catalog images
 
 ifndef ignore-not-found
   ignore-not-found = false
@@ -185,7 +204,7 @@ bundle: manifests kustomize ## Generate bundle manifests and metadata, then vali
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
-	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+	$(CONTAINER_ENGINE) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
@@ -210,7 +229,7 @@ endif
 
 # A comma-separated list of bundle images (e.g. make catalog-build BUNDLE_IMGS=example.com/operator-bundle:v0.1.0,example.com/operator-bundle:v0.2.0).
 # These images MUST exist in a registry and be pull-able.
-BUNDLE_IMGS ?= $(BUNDLE_IMG)
+BUNDLE_IMGS ?= $(BUNDLE_IMG),$(RDS_BUNDLE_IMG)
 
 # The image tag given to the resulting catalog image (e.g. make catalog-build CATALOG_IMG=example.com/operator-catalog:v0.2.0).
 CATALOG_IMG ?= $(IMAGE_TAG_BASE)-catalog:v$(VERSION)
@@ -225,9 +244,54 @@ endif
 # https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
 .PHONY: catalog-build
 catalog-build: opm ## Build a catalog image.
-	$(OPM) index add --container-tool docker --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
+	$(OPM) index add --container-tool $(CONTAINER_ENGINE) --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
 
 # Push the catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+
+.PHONY: rds-bundle
+RDS_TEMP = ./rds/temp
+RDS_BUNDLE = ./rds/bundle
+rds-bundle: ## Download the RDS bundle manifests and metadata, then validate the files.
+	mkdir -p $(dir $(RDS_TEMP))
+	curl -sSLo $(RDS_TEMP)/operators.zip https://github.com/redhat-openshift-ecosystem/community-operators-prod/archive/refs/heads/main.zip
+	unzip -o -q -j $(RDS_TEMP)/operators.zip "community-operators-prod-main/operators/ack-rds-controller/$(RDS_VERSION)/bundle.Dockerfile" -d "$(RDS_BUNDLE)"
+	unzip -o -q -j $(RDS_TEMP)/operators.zip "community-operators-prod-main/operators/ack-rds-controller/$(RDS_VERSION)/manifests/*" -d "$(RDS_BUNDLE)/bundle/manifests/"
+	unzip -o -q -j $(RDS_TEMP)/operators.zip "community-operators-prod-main/operators/ack-rds-controller/$(RDS_VERSION)/metadata/*" -d "$(RDS_BUNDLE)/bundle/metadata/"
+	unzip -o -q -j $(RDS_TEMP)/operators.zip "community-operators-prod-main/operators/ack-rds-controller/$(RDS_VERSION)/tests/scorecard/*" -d "$(RDS_BUNDLE)/bundle/tests/scorecard/"
+	curl -sSLo $(RDS_TEMP)/v$(RDS_VERSION).zip https://github.com/aws-controllers-k8s/rds-controller/archive/refs/tags/v$(RDS_VERSION).zip
+	unzip -o -q -j $(RDS_TEMP)/v$(RDS_VERSION).zip "rds-controller-$(RDS_VERSION)/config/crd/common/bases/*" -d "$(RDS_BUNDLE)/bundle/manifests/"
+
+.PHONY: rds-bundle-build
+RDS_BUNDLE = ./rds/bundle/
+rds-bundle-build: ## Build the RDS bundle image.
+	cd $(RDS_BUNDLE)
+	$(CONTAINER_ENGINE) build -f bundle.Dockerfile -t $(RDS_BUNDLE_IMG) $(RDS_BUNDLE)
+
+.PHONY: rds-bundle-push
+rds-bundle-push: ## Push the RDS bundle image.
+	$(MAKE) docker-push IMG=$(RDS_BUNDLE_IMG)
+
+.PHONY: rds-bundle-clean
+RDS_TEMP = ./rds/temp
+RDS_BUNDLE = ./rds/bundle
+rds-bundle-clean: ## Cleanup the RDS bundle manifests and metadata files.
+	find $(RDS_BUNDLE) -type f -delete
+	rm $(RDS_TEMP)/operators.zip
+
+#.PHONY: rds-crds-update
+#RDS_TEMP = ./rds/temp
+#RDS_CONFIG = ./rds/config
+#rds-crds-update: ## Download and update the additional RDS CRDs for extra RDS features.
+#	mkdir -p $(dir $(RDS_TEMP))
+#	curl -sSLo $(RDS_TEMP)/v$(RDS_VERSION).zip https://github.com/aws-controllers-k8s/rds-controller/archive/refs/tags/v$(RDS_VERSION).zip
+#	unzip -o -q -j $(RDS_TEMP)/v$(RDS_VERSION).zip "rds-controller-$(RDS_VERSION)/config/crd/common/bases/*" -d "$(RDS_CONFIG)/common/bases/"
+#
+#.PHONY: rds-crds-clean
+#RDS_TEMP = ./rds/temp
+#RDS_CONFIG = ./rds/config
+#rds-crds-clean: ## Cleanup the RDS CRD files.
+#	find $(RDS_CONFIG) -type f -delete
+#	rm $(RDS_TEMP)/v$(RDS_VERSION).zip
