@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"time"
 
 	apiv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
@@ -48,7 +49,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstypesv2 "github.com/aws/aws-sdk-go-v2/service/rds/types"
-	opv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	ophandler "github.com/operator-framework/operator-lib/handler"
 	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
@@ -67,15 +67,15 @@ const (
 	secretName    = "ack-user-secrets"
 	configmapName = "ack-user-config"
 
-	//adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
-	//adoptedResourceCRDName = "adoptedresources.services.k8s.aws"
-	catalogName         = "rds-catalogsource"
-	catalogNamespace    = "openshift-marketplace"
-	subscriptionName    = "rds-subscription"
-	subscriptionPackage = "ack-rds-controller"
-	subscriptionChannel = "alpha"
-	deploymentName      = "ack-rds-controller"
-	csvName             = "ack-rds-controller.v0.0.24"
+	adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
+	adoptedResourceCRDName = "adoptedresources.services.k8s.aws"
+	catalogName            = "rds-catalogsource"
+	catalogNamespace       = "openshift-marketplace"
+	subscriptionName       = "rds-subscription"
+	subscriptionPackage    = "ack-rds-controller"
+	subscriptionChannel    = "alpha"
+	deploymentName         = "ack-rds-controller"
+	csvName                = "ack-rds-controller.v0.0.24"
 
 	adpotedDBInstanceLabelKey   = "rds.dbaas.redhat.com/adopted"
 	adpotedDBInstanceLabelValue = "true"
@@ -99,8 +99,8 @@ const (
 	inventoryStatusMessageGetError            = "Failed to get %s"
 	inventoryStatusMessageDeleteError         = "Failed to delete %s"
 	inventoryStatusMessageCreateOrUpdateError = "Failed to create or update %s"
-	inventoryStatusMessageInstallError        = "Failed to create %s for RDS controller"
-	inventoryStatusMessageVerifyInstallError  = "Failed to verify %s for RDS controller"
+	inventoryStatusMessageInstallError        = "Failed to install %s for RDS controller"
+	inventoryStatusMessageVerifyInstallError  = "Failed to verify %s ready for RDS controller"
 
 	requiredCredentialErrorTemplate = "required credential %s is missing"
 	invalidCredentialErrorTemplate  = "credential %s is invalid"
@@ -248,43 +248,16 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					returnUpdating()
 					return true
 				}
-				//crd := &apiextensionsv1.CustomResourceDefinition{}
-				//if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crd); e != nil {
-				//	if !errors.IsNotFound(e) {
-				//		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
-				//		return true
-				//	}
-				//} else {
-				//	if e := r.Delete(ctx, crd); e != nil {
-				//		returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
-				//		return true
-				//	}
-				//	returnUpdating()
-				//	return true
-				//}
-				subscription := &opv1alpha1.Subscription{}
-				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: subscriptionName}, subscription); e != nil {
+
+				crd := &apiextensionsv1.CustomResourceDefinition{}
+				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crd); e != nil {
 					if !errors.IsNotFound(e) {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "Subscription"))
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
 						return true
 					}
 				} else {
-					if e := r.Delete(ctx, subscription); e != nil {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "Subscription"))
-						return true
-					}
-					returnUpdating()
-					return true
-				}
-				csv := &opv1alpha1.ClusterServiceVersion{}
-				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: csvName}, csv); e != nil {
-					if !errors.IsNotFound(e) {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CSV"))
-						return true
-					}
-				} else {
-					if e := r.Delete(ctx, csv); e != nil {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CSV"))
+					if e := r.Delete(ctx, crd); e != nil {
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
 						return true
 					}
 					returnUpdating()
@@ -379,27 +352,21 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return true
 		}
 
-		//if e := r.installCRD(ctx, &inventory, adoptedResourceCRDFile); e != nil {
-		//	logger.Error(e, "Failed to create CRD for RDS controller installation")
-		//	returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
-		//	return
-		//}
-		if e := r.installSubscription(ctx, &inventory); e != nil {
-			logger.Error(e, "Failed to create Subscription for RDS controller installation")
-			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "Subscription"))
+		if e := r.installCRD(ctx, &inventory, adoptedResourceCRDFile); e != nil {
+			logger.Error(e, "Failed to create CRD for RDS controller installation")
+			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
 			return true
 		}
+
+		if e := r.startOperator(ctx); e != nil {
+			logger.Error(e, "Failed to start RDS controller")
+			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "Operator Deployment"))
+			return true
+		}
+
 		if r, e := r.waitForOperator(ctx); e != nil {
 			logger.Error(e, "Failed to check operator Deployment for RDS controller installation")
 			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageVerifyInstallError, "Operator Deployment"))
-			return true
-		} else if !r {
-			returnRequeue(inventoryStatusReasonUpdating, inventoryStatusMessageInstalling)
-			return true
-		}
-		if r, e := r.waitForCSV(ctx, &inventory); e != nil {
-			logger.Error(e, "Failed to check CSV for RDS controller installation")
-			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageVerifyInstallError, "CSV"))
 			return true
 		} else if !r {
 			returnRequeue(inventoryStatusReasonUpdating, inventoryStatusMessageInstalling)
@@ -678,83 +645,53 @@ func (r *RDSInventoryReconciler) readCRDFile(file string) (*apiextensionsv1.Cust
 	return csv, nil
 }
 
-func (r *RDSInventoryReconciler) installSubscription(ctx context.Context, inventory *rdsdbaasv1alpha1.RDSInventory) error {
-	subscription := &opv1alpha1.Subscription{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      subscriptionName,
-			Namespace: r.ACKInstallNamespace,
-		},
+func (r *RDSInventoryReconciler) waitForOperator(ctx context.Context) (bool, error) {
+	deployment := &apiv1.Deployment{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
+		return false, err
 	}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, subscription, func() error {
-		subscription.Spec = &opv1alpha1.SubscriptionSpec{
-			CatalogSource:          catalogName,
-			CatalogSourceNamespace: catalogNamespace,
-			Package:                subscriptionPackage,
-			Channel:                subscriptionChannel,
-			InstallPlanApproval:    opv1alpha1.ApprovalAutomatic,
-		}
-		if err := ophandler.SetOwnerAnnotations(inventory, subscription); err != nil {
+	if deployment.Status.ReadyReplicas > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *RDSInventoryReconciler) stopOperator(ctx context.Context, cli client.Client) error {
+	logger := log.FromContext(ctx)
+
+	deployment := &apiv1.Deployment{}
+	for {
+		if err := cli.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
+			if errors.IsNotFound(err) {
+				logger.Info("Wait for the installation of the RDS controller")
+				time.Sleep(25 * time.Second)
+				continue
+			}
 			return err
 		}
-		return nil
-	}); err != nil {
-		return err
+		break
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas > 0 {
+		deployment.Spec.Replicas = pointer.Int32(0)
+		if err := cli.Update(ctx, deployment); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (r *RDSInventoryReconciler) waitForOperator(ctx context.Context) (bool, error) {
-	deployments := &apiv1.DeploymentList{}
-	opts := &client.ListOptions{
-		Namespace: r.ACKInstallNamespace,
+func (r *RDSInventoryReconciler) startOperator(ctx context.Context) error {
+	deployment := &apiv1.Deployment{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
+		return err
 	}
-	if err := r.List(ctx, deployments, opts); err != nil {
-		return false, err
-	}
-	for _, deployment := range deployments.Items {
-		if deployment.Name == deploymentName {
-			if deployment.Status.ReadyReplicas > 0 {
-				return true, nil
-			}
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
+		deployment.Spec.Replicas = pointer.Int32(1)
+		if err := r.Update(ctx, deployment); err != nil {
+			return err
 		}
 	}
-	return false, nil
-}
-
-func (r *RDSInventoryReconciler) waitForCSV(ctx context.Context, inventory *rdsdbaasv1alpha1.RDSInventory) (bool, error) {
-	csv := &opv1alpha1.ClusterServiceVersion{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.ACKInstallNamespace,
-			Namespace: csvName,
-		},
-	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(csv), csv); err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	if set := checkOwnerReferenceSet(inventory, csv); set {
-		return true, nil
-	}
-	if err := ophandler.SetOwnerAnnotations(inventory, csv); err != nil {
-		return false, err
-	}
-	if err := r.Update(ctx, csv); err != nil {
-		return false, err
-	}
-	return false, nil
-}
-
-func checkOwnerReferenceSet(inventory *rdsdbaasv1alpha1.RDSInventory, csv *opv1alpha1.ClusterServiceVersion) bool {
-	if typeString, ok := csv.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == rdsInventoryType {
-		if namespacedNameString, ok := csv.GetAnnotations()[ophandler.NamespacedNameAnnotation]; ok &&
-			namespacedNameString == fmt.Sprintf("%s/%s", inventory.Namespace, inventory.Name) {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
 func createAdoptedResource(dbInstance *rdstypesv2.DBInstance, inventory *rdsdbaasv1alpha1.RDSInventory,
@@ -802,6 +739,17 @@ func createAdoptedResource(dbInstance *rdstypesv2.DBInstance, inventory *rdsdbaa
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	kubeConfig := mgr.GetConfig()
+	cli, err := client.New(kubeConfig, client.Options{
+		Scheme: mgr.GetScheme(),
+	})
+	if err != nil {
+		return err
+	}
+	if err := r.stopOperator(context.Background(), cli); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rdsdbaasv1alpha1.RDSInventory{}).
 		Watches(
