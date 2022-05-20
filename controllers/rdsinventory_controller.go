@@ -69,9 +69,7 @@ const (
 	configmapName = "ack-user-config"
 
 	adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
-	adoptedResourceCRDName = "adoptedresources.services.k8s.aws"
 	fieldExportCRDFile     = "services.k8s.aws_fieldexports.yaml"
-	fieldExportCRDName     = "fieldexports.services.k8s.aws"
 	deploymentName         = "ack-rds-controller"
 
 	adpotedDBInstanceLabelKey   = "rds.dbaas.redhat.com/adopted"
@@ -248,35 +246,6 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					return true
 				}
 
-				crdAR := &apiextensionsv1.CustomResourceDefinition{}
-				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crdAR); e != nil {
-					if !errors.IsNotFound(e) {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
-						return true
-					}
-				} else {
-					if e := r.Delete(ctx, crdAR); e != nil {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
-						return true
-					}
-					returnUpdating()
-					return true
-				}
-				crdFE := &apiextensionsv1.CustomResourceDefinition{}
-				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: fieldExportCRDName}, crdFE); e != nil {
-					if !errors.IsNotFound(e) {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
-						return true
-					}
-				} else {
-					if e := r.Delete(ctx, crdFE); e != nil {
-						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
-						return true
-					}
-					returnUpdating()
-					return true
-				}
-
 				controllerutil.RemoveFinalizer(&inventory, inventoryFinalizer)
 				if e := r.Update(ctx, &inventory); e != nil {
 					if errors.IsConflict(e) {
@@ -344,17 +313,6 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if e := r.createOrUpdateConfigMap(ctx, &inventory, &credentialsRef); e != nil {
 			logger.Error(e, "Failed to create or update configmap for Inventory")
 			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageCreateOrUpdateError, "ConfigMap"))
-			return true
-		}
-
-		if e := r.installCRD(ctx, &inventory, adoptedResourceCRDFile); e != nil {
-			logger.Error(e, "Failed to create CRD for RDS controller installation")
-			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
-			return true
-		}
-		if e := r.installCRD(ctx, &inventory, fieldExportCRDFile); e != nil {
-			logger.Error(e, "Failed to create CRD for RDS controller installation")
-			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
 			return true
 		}
 
@@ -601,7 +559,7 @@ func buildInventoryLabels(inventory *rdsdbaasv1alpha1.RDSInventory) map[string]s
 	}
 }
 
-func (r *RDSInventoryReconciler) installCRD(ctx context.Context, inventory *rdsdbaasv1alpha1.RDSInventory, file string) error {
+func (r *RDSInventoryReconciler) installCRD(ctx context.Context, file string) error {
 	crd, err := r.readCRDFile(file)
 	if err != nil {
 		return err
@@ -613,9 +571,6 @@ func (r *RDSInventoryReconciler) installCRD(ctx context.Context, inventory *rdsd
 	}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, c, func() error {
 		c.Spec = crd.Spec
-		if e := ophandler.SetOwnerAnnotations(inventory, c); e != nil {
-			return e
-		}
 		return nil
 	}); err != nil {
 		return err
@@ -734,6 +689,8 @@ func createAdoptedResource(dbInstance *rdstypesv2.DBInstance, inventory *rdsdbaa
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	ctx := context.Background()
+
 	kubeConfig := mgr.GetConfig()
 	cli, err := client.New(kubeConfig, client.Options{
 		Scheme: mgr.GetScheme(),
@@ -741,7 +698,14 @@ func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
-	if err := r.stopRDSController(context.Background(), cli); err != nil {
+	if err := r.stopRDSController(ctx, cli); err != nil {
+		return err
+	}
+
+	if err := r.installCRD(ctx, adoptedResourceCRDFile); err != nil {
+		return err
+	}
+	if err := r.installCRD(ctx, fieldExportCRDFile); err != nil {
 		return err
 	}
 

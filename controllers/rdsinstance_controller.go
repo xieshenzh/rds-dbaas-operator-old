@@ -64,6 +64,7 @@ const (
 	instanceConditionReady = "ProvisionReady"
 
 	instanceStatusReasonReady        = "Ready"
+	instanceStatusReasonCreating     = "Creating"
 	instanceStatusReasonUpdating     = "Updating"
 	instanceStatusReasonDeleting     = "Deleting"
 	instanceStatusReasonTerminated   = "Terminated"
@@ -74,12 +75,12 @@ const (
 	instanceStatusReasonDBInstance   = "DBInstance"
 
 	instanceStatusMessageUpdateError         = "Failed to update Instance"
+	instanceStatusMessageCreating            = "Creating Instance"
 	instanceStatusMessageUpdating            = "Updating Instance"
 	instanceStatusMessageDeleting            = "Deleting Instance"
 	instanceStatusMessageError               = "Instance with error"
 	instanceStatusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
 	instanceStatusMessageGetError            = "Failed to get DB Instance"
-	instanceStatusMessageNotFound            = "DB Instance not found"
 	instanceStatusMessageDeleteError         = "Failed to delete DB Instance"
 	instanceStatusMessageInventoryNotFound   = "Inventory not found"
 	instanceStatusMessageInventoryNotReady   = "Inventory not ready"
@@ -279,10 +280,11 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return true
 		} else if r == controllerutil.OperationResultCreated {
 			phase = instancePhaseCreating
+			returnRequeue(instanceStatusReasonCreating, instanceStatusMessageCreating)
+			return true
 		} else if r == controllerutil.OperationResultUpdated {
 			phase = instancePhaseUpdating
 		}
-
 		return false
 	}
 
@@ -291,7 +293,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
 			logger.Error(e, "Failed to get DB Instance status")
 			if errors.IsNotFound(e) {
-				returnRequeue(instanceStatusReasonNotFound, instanceStatusMessageNotFound)
+				returnError(e, instanceStatusReasonNotFound, instanceStatusMessageGetError)
 			} else {
 				returnError(e, instanceStatusReasonBackendError, instanceStatusMessageGetError)
 			}
