@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,7 @@ const (
 	instanceStatusReasonBackendError = "BackendError"
 	instanceStatusReasonNotFound     = "NotFound"
 	instanceStatusReasonUnreachable  = "Unreachable"
+	instanceStatusReasonDBInstance   = "DBInstance"
 
 	instanceStatusMessageUpdateError         = "Failed to update Instance"
 	instanceStatusMessageUpdating            = "Updating Instance"
@@ -77,6 +79,7 @@ const (
 	instanceStatusMessageError               = "Instance with error"
 	instanceStatusMessageCreateOrUpdateError = "Failed to create or update DB Instance"
 	instanceStatusMessageGetError            = "Failed to get DB Instance"
+	instanceStatusMessageNotFound            = "DB Instance not found"
 	instanceStatusMessageDeleteError         = "Failed to delete DB Instance"
 	instanceStatusMessageInventoryNotFound   = "Inventory not found"
 	instanceStatusMessageInventoryNotReady   = "Inventory not ready"
@@ -288,7 +291,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if e := r.Get(ctx, client.ObjectKey{Namespace: inventory.Namespace, Name: instance.Name}, dbInstance); e != nil {
 			logger.Error(e, "Failed to get DB Instance status")
 			if errors.IsNotFound(e) {
-				returnError(e, instanceStatusReasonNotFound, instanceStatusMessageGetError)
+				returnRequeue(instanceStatusReasonNotFound, instanceStatusMessageNotFound)
 			} else {
 				returnError(e, instanceStatusReasonBackendError, instanceStatusMessageGetError)
 			}
@@ -299,13 +302,34 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		setDBInstancePhase(dbInstance, &instance)
 		setDBInstanceStatus(dbInstance, &instance)
 		for _, condition := range dbInstance.Status.Conditions {
-			apimeta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-				Type:               string(condition.Type),
-				Status:             metav1.ConditionStatus(condition.Status),
-				LastTransitionTime: metav1.Time{Time: condition.LastTransitionTime.Time},
-				Reason:             *condition.Reason,
-				Message:            *condition.Message,
-			})
+			c := metav1.Condition{
+				Type:   string(condition.Type),
+				Status: metav1.ConditionStatus(condition.Status),
+			}
+			if condition.LastTransitionTime != nil {
+				c.LastTransitionTime = metav1.Time{Time: condition.LastTransitionTime.Time}
+			}
+			if condition.Reason != nil && len(*condition.Reason) > 0 {
+				if match, _ := regexp.MatchString("^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$", *condition.Reason); match {
+					c.Reason = *condition.Reason
+					if condition.Message != nil {
+						c.Message = *condition.Message
+					}
+				} else {
+					c.Reason = instanceStatusReasonDBInstance
+					if condition.Message != nil {
+						c.Message = fmt.Sprintf("Reason: %s, Message: %s", *condition.Reason, *condition.Message)
+					} else {
+						c.Message = fmt.Sprintf("Reason: %s", *condition.Reason)
+					}
+				}
+			} else {
+				c.Reason = instanceStatusReasonDBInstance
+				if condition.Message != nil {
+					c.Message = *condition.Message
+				}
+			}
+			apimeta.SetStatusCondition(&instance.Status.Conditions, c)
 		}
 
 		if e := r.Status().Update(ctx, &instance); e != nil {
@@ -482,15 +506,22 @@ func setCredentials(ctx context.Context, cli client.Client, scheme *runtime.Sche
 					return e
 				}
 			}
-			secret.Data["username"] = []byte(generateUsername(*dbInstance.Spec.Engine))
-			secret.Data["password"] = []byte(generatePassword())
+			secret.Data = map[string][]byte{
+				"username": []byte(generateUsername(*dbInstance.Spec.Engine)),
+				"password": []byte(generatePassword()),
+			}
 			if e := cli.Create(ctx, secret); e != nil {
 				logger.Error(e, "Failed to create credential secret")
 				return e
 			}
+		} else {
+			logger.Error(e, "Failed to retrieve credential secret")
+			return e
 		}
-		logger.Error(e, "Failed to retrieve credential secret")
-		return e
+	}
+
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
 	}
 
 	var username string
@@ -499,12 +530,7 @@ func setCredentials(ctx context.Context, cli client.Client, scheme *runtime.Sche
 		username = generateUsername(*dbInstance.Spec.Engine)
 		secret.Data["username"] = []byte(username)
 	} else {
-		if du, e := parseBase64(u); e != nil {
-			logger.Error(e, "Failed to decode username in credential secret")
-			return e
-		} else {
-			username = du
-		}
+		username = string(u)
 	}
 
 	_, pok := secret.Data["password"]
@@ -549,7 +575,13 @@ func createSecretLabels(owner metav1.Object, kind string) map[string]string {
 }
 
 func setDBInstancePhase(dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) {
-	switch *dbInstance.Status.DBInstanceStatus {
+	var status string
+	if dbInstance.Status.DBInstanceStatus != nil {
+		status = *dbInstance.Status.DBInstanceStatus
+	} else {
+		status = ""
+	}
+	switch status {
 	case "available":
 		rdsInstance.Status.Phase = instancePhaseReady
 	case "creating":

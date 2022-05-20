@@ -23,7 +23,7 @@ import (
 	"io/ioutil"
 	"time"
 
-	apiv1 "k8s.io/api/apps/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -54,28 +54,25 @@ import (
 )
 
 const (
-	rdsInventoryType = "RDSInventory.dbaas.redhat.com"
-
 	inventoryFinalizer = "rds.dbaas.redhat.com/inventory"
 
-	awsAccessKeyID     = "AWS_ACCESS_KEY_ID"
-	awsSecretAccessKey = "AWS_SECRET_ACCESS_KEY"
-	awsRegion          = "AWS_REGION"
-	ackResourceTags    = "ACK_RESOURCE_TAGS"
-	ackLogLevel        = "ACK_LOG_LEVEL"
+	awsAccessKeyID              = "AWS_ACCESS_KEY_ID"
+	awsSecretAccessKey          = "AWS_SECRET_ACCESS_KEY"
+	awsRegion                   = "AWS_REGION"
+	ackResourceTags             = "ACK_RESOURCE_TAGS"
+	ackLogLevel                 = "ACK_LOG_LEVEL"
+	ackEnableDevelopmentLogging = "ACK_ENABLE_DEVELOPMENT_LOGGING"
+	ackWatchNamespace           = "ACK_WATCH_NAMESPACE"
+	awsEndpointUrl              = "AWS_ENDPOINT_URL"
 
 	secretName    = "ack-user-secrets"
 	configmapName = "ack-user-config"
 
 	adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
 	adoptedResourceCRDName = "adoptedresources.services.k8s.aws"
-	catalogName            = "rds-catalogsource"
-	catalogNamespace       = "openshift-marketplace"
-	subscriptionName       = "rds-subscription"
-	subscriptionPackage    = "ack-rds-controller"
-	subscriptionChannel    = "alpha"
+	fieldExportCRDFile     = "services.k8s.aws_fieldexports.yaml"
+	fieldExportCRDName     = "fieldexports.services.k8s.aws"
 	deploymentName         = "ack-rds-controller"
-	csvName                = "ack-rds-controller.v0.0.24"
 
 	adpotedDBInstanceLabelKey   = "rds.dbaas.redhat.com/adopted"
 	adpotedDBInstanceLabelValue = "true"
@@ -101,9 +98,9 @@ const (
 	inventoryStatusMessageCreateOrUpdateError = "Failed to create or update %s"
 	inventoryStatusMessageInstallError        = "Failed to install %s for RDS controller"
 	inventoryStatusMessageVerifyInstallError  = "Failed to verify %s ready for RDS controller"
+	inventoryStatusMessageUninstallError      = "Failed to uninstall RDS controller"
 
 	requiredCredentialErrorTemplate = "required credential %s is missing"
-	invalidCredentialErrorTemplate  = "credential %s is invalid"
 )
 
 // RDSInventoryReconciler reconciles a RDSInventory object
@@ -119,9 +116,6 @@ type RDSInventoryReconciler struct {
 //+kubebuilder:rbac:groups=rds.services.k8s.aws,resources=dbinstances,verbs=get;list;watch;update
 //+kubebuilder:rbac:groups=services.k8s.aws,resources=adoptedresources,verbs=get;list;watch;create
 //+kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch;create;delete;update
-//+kubebuilder:rbac:groups=operators.coreos.com,resources=subscriptions,verbs=get;list;create;update;watch;delete
-//+kubebuilder:rbac:groups=operators.coreos.com,resources=clusterserviceversions,verbs=get;update;delete
-//+kubebuilder:rbac:groups=operators.coreos.com,resources=clusterserviceversions/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;create;update;watch;delete
 
@@ -220,6 +214,11 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		} else {
 			if controllerutil.ContainsFinalizer(&inventory, inventoryFinalizer) {
+				if e := r.stopRDSController(ctx, r.Client); e != nil {
+					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUninstallError)
+					return true
+				}
+
 				secret := &v1.Secret{}
 				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: secretName}, secret); e != nil {
 					if !errors.IsNotFound(e) {
@@ -249,14 +248,28 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					return true
 				}
 
-				crd := &apiextensionsv1.CustomResourceDefinition{}
-				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crd); e != nil {
+				crdAR := &apiextensionsv1.CustomResourceDefinition{}
+				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: adoptedResourceCRDName}, crdAR); e != nil {
 					if !errors.IsNotFound(e) {
 						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
 						return true
 					}
 				} else {
-					if e := r.Delete(ctx, crd); e != nil {
+					if e := r.Delete(ctx, crdAR); e != nil {
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
+						return true
+					}
+					returnUpdating()
+					return true
+				}
+				crdFE := &apiextensionsv1.CustomResourceDefinition{}
+				if e := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: fieldExportCRDName}, crdFE); e != nil {
+					if !errors.IsNotFound(e) {
+						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageGetError, "CRD"))
+						return true
+					}
+				} else {
+					if e := r.Delete(ctx, crdFE); e != nil {
 						returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "CRD"))
 						return true
 					}
@@ -303,39 +316,21 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			returnError(e, inventoryStatusReasonInputError, e.Error())
 			return true
 		} else {
-			if key, e := parseBase64(ak); e != nil {
-				e := fmt.Errorf(invalidCredentialErrorTemplate, awsAccessKeyID)
-				returnError(e, inventoryStatusReasonInputError, e.Error())
-				return true
-			} else {
-				accessKey = key
-			}
+			accessKey = string(ak)
 		}
 		if sk, ok := credentialsRef.Data[awsSecretAccessKey]; !ok || len(sk) == 0 {
 			e := fmt.Errorf(requiredCredentialErrorTemplate, awsSecretAccessKey)
 			returnError(e, inventoryStatusReasonInputError, e.Error())
 			return true
 		} else {
-			if key, e := parseBase64(sk); e != nil {
-				e := fmt.Errorf(invalidCredentialErrorTemplate, awsSecretAccessKey)
-				returnError(e, inventoryStatusReasonInputError, e.Error())
-				return true
-			} else {
-				secretKey = key
-			}
+			secretKey = string(sk)
 		}
 		if r, ok := credentialsRef.Data[awsRegion]; !ok || len(r) == 0 {
 			e := fmt.Errorf(requiredCredentialErrorTemplate, awsRegion)
 			returnError(e, inventoryStatusReasonInputError, e.Error())
 			return true
 		} else {
-			if rg, e := parseBase64(r); e != nil {
-				e := fmt.Errorf(invalidCredentialErrorTemplate, awsRegion)
-				returnError(e, inventoryStatusReasonInputError, e.Error())
-				return true
-			} else {
-				region = rg
-			}
+			region = string(r)
 		}
 		return false
 	}
@@ -357,14 +352,19 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
 			return true
 		}
+		if e := r.installCRD(ctx, &inventory, fieldExportCRDFile); e != nil {
+			logger.Error(e, "Failed to create CRD for RDS controller installation")
+			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "CRD"))
+			return true
+		}
 
-		if e := r.startOperator(ctx); e != nil {
+		if e := r.startRDSController(ctx); e != nil {
 			logger.Error(e, "Failed to start RDS controller")
 			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageInstallError, "Operator Deployment"))
 			return true
 		}
 
-		if r, e := r.waitForOperator(ctx); e != nil {
+		if r, e := r.waitForRDSController(ctx); e != nil {
 			logger.Error(e, "Failed to check operator Deployment for RDS controller installation")
 			returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageVerifyInstallError, "Operator Deployment"))
 			return true
@@ -569,24 +569,19 @@ func (r *RDSInventoryReconciler) createOrUpdateConfigMap(ctx context.Context, in
 		if e := ophandler.SetOwnerAnnotations(inventory, cm); e != nil {
 			return e
 		}
-		if region, e := parseBase64(credentialsRef.Data[awsRegion]); e != nil {
-			return e
-		} else {
-			cm.Data[awsRegion] = region
+		cm.Data = map[string]string{
+			awsRegion:                   string(credentialsRef.Data[awsRegion]),
+			awsEndpointUrl:              "",
+			ackEnableDevelopmentLogging: "false",
+			ackWatchNamespace:           "",
+			ackLogLevel:                 "info",
+			ackResourceTags:             "rhoda",
 		}
 		if l, ok := credentialsRef.Data[ackLogLevel]; ok {
-			if level, e := parseBase64(l); e != nil {
-				return e
-			} else {
-				cm.Data[ackLogLevel] = level
-			}
+			cm.Data[ackLogLevel] = string(l)
 		}
 		if t, ok := credentialsRef.Data[ackResourceTags]; ok {
-			if tags, e := parseBase64(t); e != nil {
-				return e
-			} else {
-				cm.Data[ackResourceTags] = tags
-			}
+			cm.Data[ackResourceTags] = string(t)
 		}
 		return nil
 	})
@@ -645,8 +640,8 @@ func (r *RDSInventoryReconciler) readCRDFile(file string) (*apiextensionsv1.Cust
 	return csv, nil
 }
 
-func (r *RDSInventoryReconciler) waitForOperator(ctx context.Context) (bool, error) {
-	deployment := &apiv1.Deployment{}
+func (r *RDSInventoryReconciler) waitForRDSController(ctx context.Context) (bool, error) {
+	deployment := &appsv1.Deployment{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
 		return false, err
 	}
@@ -656,10 +651,10 @@ func (r *RDSInventoryReconciler) waitForOperator(ctx context.Context) (bool, err
 	return false, nil
 }
 
-func (r *RDSInventoryReconciler) stopOperator(ctx context.Context, cli client.Client) error {
+func (r *RDSInventoryReconciler) stopRDSController(ctx context.Context, cli client.Client) error {
 	logger := log.FromContext(ctx)
 
-	deployment := &apiv1.Deployment{}
+	deployment := &appsv1.Deployment{}
 	for {
 		if err := cli.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
 			if errors.IsNotFound(err) {
@@ -680,8 +675,8 @@ func (r *RDSInventoryReconciler) stopOperator(ctx context.Context, cli client.Cl
 	return nil
 }
 
-func (r *RDSInventoryReconciler) startOperator(ctx context.Context) error {
-	deployment := &apiv1.Deployment{}
+func (r *RDSInventoryReconciler) startRDSController(ctx context.Context) error {
+	deployment := &appsv1.Deployment{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
 		return err
 	}
@@ -746,7 +741,7 @@ func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
-	if err := r.stopOperator(context.Background(), cli); err != nil {
+	if err := r.stopRDSController(context.Background(), cli); err != nil {
 		return err
 	}
 

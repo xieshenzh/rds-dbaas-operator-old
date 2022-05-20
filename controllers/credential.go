@@ -18,14 +18,13 @@ package controllers
 
 import (
 	cryptorand "crypto/rand"
-	"encoding/base64"
 	"math/big"
 	"math/rand"
 )
 
 const (
 	digits   = "0123456789"
-	specials = "~=+%^*/()[]{}/!@#$?|"
+	specials = "~=+%^*()[]{}!#$?|"
 	all      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" + digits + specials
 )
 
@@ -70,12 +69,4 @@ func generatePassword() string {
 func getRandInt(s int) int64 {
 	result, _ := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(s)))
 	return result.Int64()
-}
-
-func parseBase64(bytes []byte) (string, error) {
-	var parsed []byte
-	if _, e := base64.StdEncoding.Decode(parsed, bytes); e != nil {
-		return "", e
-	}
-	return string(parsed), nil
 }

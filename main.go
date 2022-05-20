@@ -28,7 +28,9 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -40,7 +42,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	dbaasv1alpha1 "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
-	rdsv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
+	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
+	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
+	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 	"github.com/xieshenzh/rds-dbaas-operator/controllers"
 	//+kubebuilder:scaffold:imports
 )
@@ -57,8 +61,12 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(rdsdbaasv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(dbaasv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(rdsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(ackv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -164,7 +172,7 @@ func main() {
 	}
 
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err = (&rdsv1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr); err != nil {
+		if err = (&rdsdbaasv1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "RDSInventory")
 			os.Exit(1)
 		}
