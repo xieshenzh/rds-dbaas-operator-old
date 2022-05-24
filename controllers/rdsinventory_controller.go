@@ -559,7 +559,7 @@ func buildInventoryLabels(inventory *rdsdbaasv1alpha1.RDSInventory) map[string]s
 	}
 }
 
-func (r *RDSInventoryReconciler) installCRD(ctx context.Context, file string) error {
+func (r *RDSInventoryReconciler) installCRD(ctx context.Context, cli client.Client, file string) error {
 	crd, err := r.readCRDFile(file)
 	if err != nil {
 		return err
@@ -569,7 +569,7 @@ func (r *RDSInventoryReconciler) installCRD(ctx context.Context, file string) er
 			Name: crd.Name,
 		},
 	}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, c, func() error {
+	if _, err := controllerutil.CreateOrUpdate(ctx, cli, c, func() error {
 		c.Spec = crd.Spec
 		return nil
 	}); err != nil {
@@ -702,10 +702,10 @@ func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	if err := r.installCRD(ctx, adoptedResourceCRDFile); err != nil {
+	if err := r.installCRD(ctx, cli, adoptedResourceCRDFile); err != nil {
 		return err
 	}
-	if err := r.installCRD(ctx, fieldExportCRDFile); err != nil {
+	if err := r.installCRD(ctx, cli, fieldExportCRDFile); err != nil {
 		return err
 	}
 
