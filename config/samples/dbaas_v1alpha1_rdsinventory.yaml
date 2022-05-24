@@ -2,5 +2,8 @@ apiVersion: dbaas.redhat.com/v1alpha1
 kind: RDSInventory
 metadata:
   name: rdsinventory-sample
+  namespace: rds-sample
 spec:
-  # TODO(user): Add fields here
+  credentialsRef:
+    namespace: rds-sample
+    name: rds-credentials-sample

@@ -2,5 +2,9 @@ apiVersion: dbaas.redhat.com/v1alpha1
 kind: RDSConnection
 metadata:
   name: rdsconnection-sample
+  namespace: rds-sample
 spec:
-  # TODO(user): Add fields here
+  inventoryRef:
+    namespace: rds-sample
+    name: rdsinventory-sample
+  instanceID: rdsinstance-sample
