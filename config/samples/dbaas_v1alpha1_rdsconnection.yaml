@@ -7,4 +7,4 @@ spec:
   inventoryRef:
     namespace: rds-sample
     name: rdsinventory-sample
-  instanceID: rdsinstance-sample
+  instanceID: rds-instance-sample
