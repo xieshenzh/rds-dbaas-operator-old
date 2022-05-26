@@ -46,6 +46,7 @@ import (
 
 const (
 	rdsInstanceType = "RDSInstance.dbaas.redhat.com"
+	rdsInstanceKind = "DBInstance"
 
 	instanceFinalizer = "rds.dbaas.redhat.com/instance"
 
@@ -948,23 +949,27 @@ func (r *RDSInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&source.Kind{Type: &rdsv1alpha1.DBInstance{}},
 			handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
-				return []reconcile.Request{getOwnerInstanceRequests(o)}
+				return getOwnerInstanceRequests(o)
 			}),
 		).
 		Complete(r)
 }
 
 // Code from operator-lib: https://github.com/operator-framework/operator-lib/blob/d389ad4d93a46dba047b11161b755141fc853098/handler/enqueue_annotation.go#L121
-func getOwnerInstanceRequests(object client.Object) reconcile.Request {
+func getOwnerInstanceRequests(object client.Object) []reconcile.Request {
 	if typeString, ok := object.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == rdsInstanceType {
 		namespacedNameString, ok := object.GetAnnotations()[ophandler.NamespacedNameAnnotation]
 		if !ok || strings.TrimSpace(namespacedNameString) == "" {
-			return reconcile.Request{}
+			return []reconcile.Request{}
 		}
 		nsn := parseNamespacedName(namespacedNameString)
-		return reconcile.Request{NamespacedName: nsn}
+		return []reconcile.Request{
+			{
+				NamespacedName: nsn,
+			},
+		}
 	}
-	return reconcile.Request{}
+	return []reconcile.Request{}
 }
 
 func parseNamespacedName(namespacedNameString string) types.NamespacedName {

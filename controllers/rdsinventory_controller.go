@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,7 +31,6 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/utils/pointer"
@@ -54,6 +54,8 @@ import (
 )
 
 const (
+	rdsInventoryType = "RDSInsventory.dbaas.redhat.com"
+
 	inventoryFinalizer = "rds.dbaas.redhat.com/inventory"
 
 	awsAccessKeyID              = "AWS_ACCESS_KEY_ID"
@@ -212,6 +214,35 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		} else {
 			if controllerutil.ContainsFinalizer(&inventory, inventoryFinalizer) {
+				adoptedResourceList := &ackv1alpha1.AdoptedResourceList{}
+				if e := r.List(ctx, adoptedResourceList, client.InNamespace(inventory.Namespace)); e != nil {
+					returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "AdoptedResource"))
+					return true
+				}
+				deletingAdoptedResource := false
+				for _, adoptedResource := range adoptedResourceList.Items {
+					if typeString, ok := adoptedResource.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == rdsInventoryType {
+						namespacedNameString, ok := adoptedResource.GetAnnotations()[ophandler.NamespacedNameAnnotation]
+						if !ok || strings.TrimSpace(namespacedNameString) == "" {
+							continue
+						}
+						nsn := parseNamespacedName(namespacedNameString)
+						if nsn.Name == inventory.Name && nsn.Namespace == inventory.Namespace {
+							if adoptedResource.ObjectMeta.DeletionTimestamp.IsZero() {
+								if e := r.Delete(ctx, &adoptedResource); e != nil {
+									returnError(e, inventoryStatusReasonBackendError, fmt.Sprintf(inventoryStatusMessageDeleteError, "AdoptedResource"))
+									return true
+								}
+							}
+							deletingAdoptedResource = true
+						}
+					}
+				}
+				if deletingAdoptedResource {
+					returnUpdating()
+					return true
+				}
+
 				if e := r.stopRDSController(ctx, r.Client); e != nil {
 					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUninstallError)
 					return true
@@ -375,12 +406,18 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				adoptedDBInstanceMap[adoptedDBInstance.Spec.AWS.NameOrID] = adoptedDBInstance
 			}
 
-			dbInstanceGVK := (&rdsv1alpha1.DBInstance{}).GroupVersionKind()
-			inventoryGVK := inventory.GroupVersionKind()
 			for _, dbInstance := range awsDBInstances {
+				if dbInstance.DBInstanceStatus != nil && *dbInstance.DBInstanceStatus == "deleting" {
+					continue
+				}
 				if _, ok := dbInstanceMap[*dbInstance.DBInstanceIdentifier]; !ok {
 					if _, ok := adoptedDBInstanceMap[*dbInstance.DBInstanceIdentifier]; !ok {
-						adoptedDBInstance := createAdoptedResource(&dbInstance, &inventory, &dbInstanceGVK, &inventoryGVK)
+						adoptedDBInstance := createAdoptedResource(&dbInstance, &inventory)
+						if e := ophandler.SetOwnerAnnotations(&inventory, adoptedDBInstance); e != nil {
+							logger.Error(e, "Failed to create adopted DB Instance in the cluster")
+							returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageAdoptInstanceError)
+							return true
+						}
 						if e := r.Create(ctx, adoptedDBInstance); e != nil {
 							logger.Error(e, "Failed to create adopted DB Instance in the cluster")
 							returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageAdoptInstanceError)
@@ -644,8 +681,7 @@ func (r *RDSInventoryReconciler) startRDSController(ctx context.Context) error {
 	return nil
 }
 
-func createAdoptedResource(dbInstance *rdstypesv2.DBInstance, inventory *rdsdbaasv1alpha1.RDSInventory,
-	dbInstanceGVK *schema.GroupVersionKind, inventoryGVK *schema.GroupVersionKind) *ackv1alpha1.AdoptedResource {
+func createAdoptedResource(dbInstance *rdstypesv2.DBInstance, inventory *rdsdbaasv1alpha1.RDSInventory) *ackv1alpha1.AdoptedResource {
 	return &ackv1alpha1.AdoptedResource{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:    inventory.Namespace,
@@ -656,22 +692,12 @@ func createAdoptedResource(dbInstance *rdstypesv2.DBInstance, inventory *rdsdbaa
 				"owner.kind":      inventory.Kind,
 				"owner.namespace": inventory.Namespace,
 			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         inventoryGVK.GroupVersion().String(),
-					Kind:               inventoryGVK.Kind,
-					Name:               inventory.GetName(),
-					UID:                inventory.GetUID(),
-					BlockOwnerDeletion: pointer.BoolPtr(true),
-					Controller:         pointer.BoolPtr(true),
-				},
-			},
 		},
 		Spec: ackv1alpha1.AdoptedResourceSpec{
 			Kubernetes: &ackv1alpha1.ResourceWithMetadata{
 				GroupKind: metav1.GroupKind{
-					Group: dbInstanceGVK.Group,
-					Kind:  dbInstanceGVK.Kind,
+					Group: rdsv1alpha1.GroupVersion.Group,
+					Kind:  rdsInstanceKind,
 				},
 				Metadata: &ackv1alpha1.PartialObjectMeta{
 					Namespace: inventory.Namespace,
