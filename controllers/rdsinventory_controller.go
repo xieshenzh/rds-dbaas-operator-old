@@ -54,7 +54,7 @@ import (
 )
 
 const (
-	rdsInventoryType = "RDSInsventory.dbaas.redhat.com"
+	rdsInventoryType = "RDSInventory.dbaas.redhat.com"
 
 	inventoryFinalizer = "rds.dbaas.redhat.com/inventory"
 
@@ -114,10 +114,11 @@ type RDSInventoryReconciler struct {
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories/finalizers,verbs=update
 //+kubebuilder:rbac:groups=rds.services.k8s.aws,resources=dbinstances,verbs=get;list;watch;update
-//+kubebuilder:rbac:groups=services.k8s.aws,resources=adoptedresources,verbs=get;list;watch;create
+//+kubebuilder:rbac:groups=rds.services.k8s.aws,resources=dbinstances/finalizers,verbs=update
+//+kubebuilder:rbac:groups=services.k8s.aws,resources=adoptedresources,verbs=get;list;watch;create;delete;update
 //+kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch;create;delete;update
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
-//+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;create;update;watch;delete
+//+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -291,12 +292,10 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				returnNotReady(inventoryStatusReasonUpdating, inventoryStatusMessageUpdating)
 				return true
 			}
-
 			// Stop reconciliation as the item is being deleted
 			returnNotReady(inventoryStatusReasonDeleting, inventoryStatusMessageDeleting)
 			return true
 		}
-
 		return false
 	}
 
@@ -435,10 +434,20 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
 			return true
 		}
-
 		for _, adoptedDBInstance := range adoptedDBInstanceList.Items {
-			if adoptedDBInstance.Spec.MasterUsername == nil || adoptedDBInstance.Spec.MasterUserPassword == nil {
-				if e := setCredentials(ctx, r.Client, r.Scheme, &adoptedDBInstance, inventory.Namespace, nil, ""); e != nil {
+			if adoptedDBInstance.Spec.MasterUserPassword == nil {
+				s, e := setCredentials(ctx, r.Client, r.Scheme, &adoptedDBInstance, inventory.Namespace, &adoptedDBInstance, adoptedDBInstance.Kind)
+				if e != nil {
+					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
+					return true
+				}
+				password := s.Data["password"]
+				input := &rds.ModifyDBInstanceInput{
+					DBInstanceIdentifier: adoptedDBInstance.Spec.DBInstanceIdentifier,
+					MasterUserPassword:   pointer.String(string(password)),
+				}
+				if _, e := awsClient.ModifyDBInstance(ctx, input); e != nil {
+					logger.Error(e, "Failed to update credentials of the adopted DB Instance", "DB Instance", adoptedDBInstance)
 					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
 					return true
 				}

@@ -149,11 +149,19 @@ rules:
   - update
   - watch
 - apiGroups:
+  - rds.services.k8s.aws
+  resources:
+  - dbinstances/finalizers
+  verbs:
+  - update
+- apiGroups:
   - services.k8s.aws
   resources:
   - adoptedresources
   verbs:
   - create
+  - delete
   - get
   - list
+  - update
   - watch

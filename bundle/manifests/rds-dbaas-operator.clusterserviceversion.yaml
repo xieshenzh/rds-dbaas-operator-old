@@ -12,7 +12,7 @@ metadata:
             "namespace": "rds-sample"
           },
           "spec": {
-            "instanceID": "rdsinstance-sample",
+            "instanceID": "rds-instance-sample",
             "inventoryRef": {
               "name": "rdsinventory-sample",
               "namespace": "rds-sample"
@@ -241,13 +241,21 @@ spec:
           - update
           - watch
         - apiGroups:
+          - rds.services.k8s.aws
+          resources:
+          - dbinstances/finalizers
+          verbs:
+          - update
+        - apiGroups:
           - services.k8s.aws
           resources:
           - adoptedresources
           verbs:
           - create
+          - delete
           - get
           - list
+          - update
           - watch
         - apiGroups:
           - authentication.k8s.io

@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -480,7 +481,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		dbInstance.Spec.VPCSecurityGroupIDs = sgs
 	}
 
-	if e := setCredentials(ctx, r.Client, r.Scheme, dbInstance, rdsInstance.Namespace, rdsInstance, rdsInstance.Kind); e != nil {
+	if _, e := setCredentials(ctx, r.Client, r.Scheme, dbInstance, rdsInstance.Namespace, rdsInstance, rdsInstance.Kind); e != nil {
 		return fmt.Errorf("failed to set credentials for DB instance")
 	}
 
@@ -493,7 +494,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 }
 
 func setCredentials(ctx context.Context, cli client.Client, scheme *runtime.Scheme, dbInstance *rdsv1alpha1.DBInstance,
-	namespace string, owner metav1.Object, kind string) error {
+	namespace string, owner metav1.Object, kind string) (*v1.Secret, error) {
 	logger := log.FromContext(ctx)
 
 	secretName := fmt.Sprintf("%s-credentials", dbInstance.GetName())
@@ -506,49 +507,36 @@ func setCredentials(ctx context.Context, cli client.Client, scheme *runtime.Sche
 			if owner != nil {
 				if e := ctrl.SetControllerReference(owner, secret, scheme); e != nil {
 					logger.Error(e, "Failed to set owner reference for credential Secret")
-					return e
+					return nil, e
 				}
 			}
 			secret.Data = map[string][]byte{
-				"username": []byte(generateUsername(*dbInstance.Spec.Engine)),
 				"password": []byte(generatePassword()),
 			}
 			if e := cli.Create(ctx, secret); e != nil {
 				logger.Error(e, "Failed to create credential secret")
-				return e
+				return nil, e
 			}
 		} else {
 			logger.Error(e, "Failed to retrieve credential secret")
-			return e
+			return nil, e
 		}
 	}
 
 	if secret.Data == nil {
 		secret.Data = map[string][]byte{}
 	}
-
-	var username string
-	u, nok := secret.Data["username"]
-	if !nok {
-		username = generateUsername(*dbInstance.Spec.Engine)
-		secret.Data["username"] = []byte(username)
-	} else {
-		username = string(u)
-	}
-
-	_, pok := secret.Data["password"]
-	if !pok {
+	if _, ok := secret.Data["password"]; !ok {
 		secret.Data["password"] = []byte(generatePassword())
-	}
-
-	if !nok || !pok {
 		if e := cli.Update(ctx, secret); e != nil {
 			logger.Error(e, "Failed to update credential secret")
-			return e
+			return nil, e
 		}
 	}
 
-	dbInstance.Spec.MasterUsername = &username
+	if dbInstance.Spec.MasterUsername == nil {
+		dbInstance.Spec.MasterUsername = pointer.String(generateUsername(*dbInstance.Spec.Engine))
+	}
 
 	dbInstance.Spec.MasterUserPassword = &ackv1alpha1.SecretKeyReference{
 		SecretReference: v1.SecretReference{
@@ -558,7 +546,7 @@ func setCredentials(ctx context.Context, cli client.Client, scheme *runtime.Sche
 		Key: "password",
 	}
 
-	return nil
+	return secret, nil
 }
 
 func createSecretLabels(owner metav1.Object, kind string) map[string]string {
