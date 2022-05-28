@@ -18,6 +18,7 @@ package controllers
 
 import (
 	cryptorand "crypto/rand"
+	"k8s.io/utils/pointer"
 	"math/big"
 	"math/rand"
 )
@@ -39,14 +40,11 @@ func generateUsername(engine string) string {
 func generateDBName(engine string) *string {
 	switch engine {
 	case "postgres", "aurora-postgresql":
-		dbName := "postgres"
-		return &dbName
+		return pointer.String("postgres")
 	case "mysql", "mariadb", "aurora", "aurora-mysql":
-		dbName := "mysql"
-		return &dbName
+		return pointer.String("mydb")
 	case "oracle-se2", "oracle-se2-cdb", "oracle-ee", "oracle-ee-cdb", "custom-oracle-ee":
-		dbName := "orcl"
-		return &dbName
+		return pointer.String("ORCL")
 	default:
 		return nil
 	}
@@ -69,4 +67,19 @@ func generatePassword() string {
 func getRandInt(s int) int64 {
 	result, _ := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(s)))
 	return result.Int64()
+}
+
+func generateBindingType(engine string) string {
+	switch engine {
+	case "postgres", "aurora-postgresql":
+		return "postgresql"
+	case "mysql", "mariadb", "aurora", "aurora-mysql":
+		return "mysql"
+	case "oracle-se2", "oracle-se2-cdb", "oracle-ee", "oracle-ee-cdb", "custom-oracle-ee":
+		return "oracle"
+	case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web":
+		return "sqlserver"
+	default:
+		return ""
+	}
 }

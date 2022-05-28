@@ -292,6 +292,12 @@ func bridgeProviderCR(clusterRoleList *rbac.ClusterRoleList) *dbaasoperator.DBaa
 					Type:        "string",
 					Required:    false,
 				},
+				{
+					Name:        licenseModel,
+					DisplayName: "License Model",
+					Type:        "string",
+					Required:    false,
+				},
 			},
 		},
 	}

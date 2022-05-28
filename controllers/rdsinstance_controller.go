@@ -62,6 +62,7 @@ const (
 	dbSubnetGroupName    = "DBSubnetGroupName"
 	publiclyAccessible   = "PubliclyAccessible"
 	vpcSecurityGroupIDs  = "VPCSecurityGroupIDs"
+	licenseModel         = "LicenseModel"
 
 	instanceConditionReady = "ProvisionReady"
 
@@ -408,36 +409,36 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstance *rdsv1alpha1.DBInstance, rdsInstance *rdsdbaasv1alpha1.RDSInstance) error {
 	if engine, ok := rdsInstance.Spec.OtherInstanceParams[engine]; ok {
-		dbInstance.Spec.Engine = &engine
+		dbInstance.Spec.Engine = pointer.String(engine)
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "Engine")
 	}
 
 	if engineVersion, ok := rdsInstance.Spec.OtherInstanceParams[engineVersion]; ok {
-		dbInstance.Spec.EngineVersion = &engineVersion
+		dbInstance.Spec.EngineVersion = pointer.String(engineVersion)
 	}
 
 	if dbInstanceId, ok := rdsInstance.Spec.OtherInstanceParams[dbInstanceIdentifier]; ok {
-		dbInstance.Spec.DBInstanceIdentifier = &dbInstanceId
+		dbInstance.Spec.DBInstanceIdentifier = pointer.String(dbInstanceId)
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceIdentifier")
 	}
 
 	if dbInstanceClass, ok := rdsInstance.Spec.OtherInstanceParams[dbInstanceClass]; ok {
-		dbInstance.Spec.DBInstanceClass = &dbInstanceClass
+		dbInstance.Spec.DBInstanceClass = pointer.String(dbInstanceClass)
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "DBInstanceClass")
 	}
 
 	if storageType, ok := rdsInstance.Spec.OtherInstanceParams[storageType]; ok {
-		dbInstance.Spec.StorageType = &storageType
+		dbInstance.Spec.StorageType = pointer.String(storageType)
 	}
 
 	if allocatedStorage, ok := rdsInstance.Spec.OtherInstanceParams[allocatedStorage]; ok {
 		if i, e := strconv.ParseInt(allocatedStorage, 10, 64); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "AllocatedStorage")
 		} else {
-			dbInstance.Spec.AllocatedStorage = &i
+			dbInstance.Spec.AllocatedStorage = pointer.Int64(i)
 		}
 	} else {
 		return fmt.Errorf(requiredParameterErrorTemplate, "AllocatedStorage")
@@ -447,7 +448,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		if i, e := strconv.ParseInt(iops, 10, 64); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "IOPS")
 		} else {
-			dbInstance.Spec.IOPS = &i
+			dbInstance.Spec.IOPS = pointer.Int64(i)
 		}
 	}
 
@@ -455,19 +456,19 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		if i, e := strconv.ParseInt(maxAllocatedStorage, 10, 64); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "MaxAllocatedStorage")
 		} else {
-			dbInstance.Spec.MaxAllocatedStorage = &i
+			dbInstance.Spec.MaxAllocatedStorage = pointer.Int64(i)
 		}
 	}
 
 	if dbSubnetGroupName, ok := rdsInstance.Spec.OtherInstanceParams[dbSubnetGroupName]; ok {
-		dbInstance.Spec.DBSubnetGroupName = &dbSubnetGroupName
+		dbInstance.Spec.DBSubnetGroupName = pointer.String(dbSubnetGroupName)
 	}
 
 	if publiclyAccessible, ok := rdsInstance.Spec.OtherInstanceParams[publiclyAccessible]; ok {
 		if b, e := strconv.ParseBool(publiclyAccessible); e != nil {
 			return fmt.Errorf(invalidParameterErrorTemplate, "PubliclyAccessible")
 		} else {
-			dbInstance.Spec.PubliclyAccessible = &b
+			dbInstance.Spec.PubliclyAccessible = pointer.Bool(b)
 		}
 	}
 
@@ -476,9 +477,13 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 		var sgs []*string
 		for _, s := range sl {
 			st := s
-			sgs = append(sgs, &st)
+			sgs = append(sgs, pointer.String(st))
 		}
 		dbInstance.Spec.VPCSecurityGroupIDs = sgs
+	}
+
+	if licenseModel, ok := rdsInstance.Spec.OtherInstanceParams[licenseModel]; ok {
+		dbInstance.Spec.LicenseModel = pointer.String(licenseModel)
 	}
 
 	if _, e := setCredentials(ctx, r.Client, r.Scheme, dbInstance, rdsInstance.Namespace, rdsInstance, rdsInstance.Kind); e != nil {
@@ -488,7 +493,7 @@ func (r *RDSInstanceReconciler) setDBInstanceSpec(ctx context.Context, dbInstanc
 	dbName := generateDBName(*dbInstance.Spec.Engine)
 	dbInstance.Spec.DBName = dbName
 
-	dbInstance.Spec.AvailabilityZone = &rdsInstance.Spec.CloudRegion
+	dbInstance.Spec.AvailabilityZone = pointer.String(rdsInstance.Spec.CloudRegion)
 
 	return nil
 }

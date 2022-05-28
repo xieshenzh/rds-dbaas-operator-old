@@ -380,6 +380,7 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 		}
 
+		awsDBInstanceMap := make(map[string]rdstypesv2.DBInstance, len(awsDBInstances))
 		if len(awsDBInstances) > 0 {
 			// query all db instances in cluster
 			clusterDBInstanceList := &rdsv1alpha1.DBInstanceList{}
@@ -405,7 +406,9 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				adoptedDBInstanceMap[adoptedDBInstance.Spec.AWS.NameOrID] = adoptedDBInstance
 			}
 
+			adoptingResource := false
 			for _, dbInstance := range awsDBInstances {
+				awsDBInstanceMap[*dbInstance.DBInstanceIdentifier] = dbInstance
 				if dbInstance.DBInstanceStatus != nil && *dbInstance.DBInstanceStatus == "deleting" {
 					continue
 				}
@@ -422,8 +425,14 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 							returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageAdoptInstanceError)
 							return true
 						}
+						adoptingResource = true
 					}
 				}
+			}
+			if adoptingResource {
+				logger.Info("DB Instance adopted")
+				returnUpdating()
+				return true
 			}
 		}
 
@@ -434,8 +443,13 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
 			return true
 		}
+		waitForAdoptedResource := false
 		for _, adoptedDBInstance := range adoptedDBInstanceList.Items {
 			if adoptedDBInstance.Spec.MasterUserPassword == nil {
+				if adoptedDBInstance.Status.DBInstanceStatus != nil && *adoptedDBInstance.Status.DBInstanceStatus != "available" {
+					waitForAdoptedResource = true
+					continue
+				}
 				s, e := setCredentials(ctx, r.Client, r.Scheme, &adoptedDBInstance, inventory.Namespace, &adoptedDBInstance, adoptedDBInstance.Kind)
 				if e != nil {
 					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
@@ -462,8 +476,38 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					return true
 				}
 			}
-		}
 
+			if adoptedDBInstance.Spec.MasterUsername == nil || adoptedDBInstance.Spec.DBName == nil {
+				if awsDBInstance, ok := awsDBInstanceMap[*adoptedDBInstance.Spec.DBInstanceIdentifier]; ok {
+					update := false
+					if adoptedDBInstance.Spec.MasterUsername == nil && awsDBInstance.MasterUsername != nil {
+						adoptedDBInstance.Spec.MasterUsername = pointer.String(*awsDBInstance.MasterUsername)
+						update = true
+					}
+					if adoptedDBInstance.Spec.DBName == nil && awsDBInstance.DBName != nil {
+						adoptedDBInstance.Spec.DBName = pointer.String(*awsDBInstance.DBName)
+						update = true
+					}
+					if update {
+						if e := r.Update(ctx, &adoptedDBInstance); e != nil {
+							if errors.IsConflict(e) {
+								logger.Info("Adopted DB Instance modified, retry reconciling")
+								returnUpdating()
+								return true
+							}
+							logger.Error(e, "Failed to update connection info of the adopted DB Instance", "DB Instance", adoptedDBInstance)
+							returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
+							return true
+						}
+					}
+				}
+			}
+		}
+		if waitForAdoptedResource {
+			logger.Info("DB Instance being adopted is not available, retry reconciling")
+			returnUpdating()
+			return true
+		}
 		return false
 	}
 

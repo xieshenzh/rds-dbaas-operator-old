@@ -354,7 +354,7 @@ func buildConnectionLabels(connection *rdsdbaasv1alpha1.RDSConnection) map[strin
 
 func setConfigMap(cm *v1.ConfigMap, dbInstance *rdsv1alpha1.DBInstance) {
 	dataMap := map[string]string{
-		"type":     *dbInstance.Spec.Engine,
+		"type":     generateBindingType(*dbInstance.Spec.Engine),
 		"provider": databaseProvider,
 		"host":     *dbInstance.Status.Endpoint.Address,
 		"port":     strconv.FormatInt(*dbInstance.Status.Endpoint.Port, 10),
@@ -365,8 +365,13 @@ func setConfigMap(cm *v1.ConfigMap, dbInstance *rdsv1alpha1.DBInstance) {
 		switch *dbInstance.Spec.Engine {
 		case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web":
 			dataMap["database"] = "master"
+		case "mysql", "mariadb", "aurora", "aurora-mysql":
+			dataMap["database"] = "mysql"
+		case "postgres", "aurora-postgresql":
+			dataMap["database"] = "postgres"
+		case "oracle-se2", "oracle-se2-cdb", "oracle-ee", "oracle-ee-cdb", "custom-oracle-ee":
+			dataMap["database"] = "ORCL"
 		default:
-			dataMap["database"] = *generateDBName(*dbInstance.Spec.Engine)
 		}
 	}
 
