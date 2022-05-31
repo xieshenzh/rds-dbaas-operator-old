@@ -65,7 +65,7 @@ const (
 	connectionStatusMessagePasswordInvalid   = "Password invalid"
 	connectionStatusMessageUsernameNotFound  = "Username not found"
 	connectionStatusMessageEndpointNotFound  = "Endpoint not found"
-	connectionStatusMessageGetPasswordError  = "Failed to get secret for password"
+	connectionStatusMessageGetPasswordError  = "Failed to get secret for password" //#nosec G101
 	connectionStatusMessageInventoryNotFound = "Inventory not found"
 	connectionStatusMessageInventoryNotReady = "Inventory not ready"
 	connectionStatusMessageGetInventoryError = "Failed to get Inventory"

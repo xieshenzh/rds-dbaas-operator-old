@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -59,7 +60,7 @@ const (
 	inventoryFinalizer = "rds.dbaas.redhat.com/inventory"
 
 	awsAccessKeyID              = "AWS_ACCESS_KEY_ID"
-	awsSecretAccessKey          = "AWS_SECRET_ACCESS_KEY"
+	awsSecretAccessKey          = "AWS_SECRET_ACCESS_KEY" //#nosec G101
 	awsRegion                   = "AWS_REGION"
 	ackResourceTags             = "ACK_RESOURCE_TAGS"
 	ackLogLevel                 = "ACK_LOG_LEVEL"
@@ -221,7 +222,8 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					return true
 				}
 				deletingAdoptedResource := false
-				for _, adoptedResource := range adoptedResourceList.Items {
+				for i := range adoptedResourceList.Items {
+					adoptedResource := adoptedResourceList.Items[i]
 					if typeString, ok := adoptedResource.GetAnnotations()[ophandler.TypeAnnotation]; ok && typeString == rdsInventoryType {
 						namespacedNameString, ok := adoptedResource.GetAnnotations()[ophandler.NamespacedNameAnnotation]
 						if !ok || strings.TrimSpace(namespacedNameString) == "" {
@@ -407,7 +409,8 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			}
 
 			adoptingResource := false
-			for _, dbInstance := range awsDBInstances {
+			for i := range awsDBInstances {
+				dbInstance := awsDBInstances[i]
 				awsDBInstanceMap[*dbInstance.DBInstanceIdentifier] = dbInstance
 				if dbInstance.DBInstanceStatus != nil && *dbInstance.DBInstanceStatus == "deleting" {
 					continue
@@ -444,7 +447,8 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return true
 		}
 		waitForAdoptedResource := false
-		for _, adoptedDBInstance := range adoptedDBInstanceList.Items {
+		for i := range adoptedDBInstanceList.Items {
+			adoptedDBInstance := adoptedDBInstanceList.Items[i]
 			if adoptedDBInstance.Spec.MasterUserPassword == nil {
 				if adoptedDBInstance.Status.DBInstanceStatus != nil && *adoptedDBInstance.Status.DBInstanceStatus != "available" {
 					waitForAdoptedResource = true
@@ -520,7 +524,8 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 
 		var instances []dbaasv1alpha1.Instance
-		for _, dbInstance := range dbInstanceList.Items {
+		for i := range dbInstanceList.Items {
+			dbInstance := dbInstanceList.Items[i]
 			instance := dbaasv1alpha1.Instance{
 				InstanceID:   *dbInstance.Spec.DBInstanceIdentifier,
 				Name:         dbInstance.Name,
@@ -669,7 +674,7 @@ func (r *RDSInventoryReconciler) installCRD(ctx context.Context, cli client.Clie
 }
 
 func (r *RDSInventoryReconciler) readCRDFile(file string) (*apiextensionsv1.CustomResourceDefinition, error) {
-	d, err := ioutil.ReadFile(file)
+	d, err := ioutil.ReadFile(filepath.Clean(file))
 	if err != nil {
 		return nil, err
 	}
