@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1alpha1
+package v1alpha1_test
 
 import (
 	"context"
@@ -31,23 +31,29 @@ import (
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	//+kubebuilder:scaffold:imports
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest/printer"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
-var cfg *rest.Config
 var k8sClient client.Client
 var testEnv *envtest.Environment
 var ctx context.Context
 var cancel context.CancelFunc
+
+const (
+	testNamespace = "default"
+
+	timeout = time.Second * 10
+)
 
 func TestAPIs(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -76,7 +82,7 @@ var _ = BeforeSuite(func() {
 	Expect(cfg).NotTo(BeNil())
 
 	scheme := runtime.NewScheme()
-	err = AddToScheme(scheme)
+	err = v1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	err = admissionv1beta1.AddToScheme(scheme)
@@ -100,7 +106,7 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	err = (&RDSInventory{}).SetupWebhookWithManager(mgr)
+	err = (&v1alpha1.RDSInventory{}).SetupWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	//+kubebuilder:scaffold:webhook
@@ -119,7 +125,7 @@ var _ = BeforeSuite(func() {
 		if err != nil {
 			return err
 		}
-		conn.Close()
+		_ = conn.Close()
 		return nil
 	}).Should(Succeed())
 

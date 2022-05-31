@@ -306,6 +306,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		instance.Status.InstanceID = *dbInstance.Spec.DBInstanceIdentifier
 		setDBInstancePhase(dbInstance, &instance)
 		setDBInstanceStatus(dbInstance, &instance)
+		regex := regexp.MustCompile("^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$")
 		for _, condition := range dbInstance.Status.Conditions {
 			c := metav1.Condition{
 				Type:   string(condition.Type),
@@ -315,7 +316,7 @@ func (r *RDSInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				c.LastTransitionTime = metav1.Time{Time: condition.LastTransitionTime.Time}
 			}
 			if condition.Reason != nil && len(*condition.Reason) > 0 {
-				if match, _ := regexp.MatchString("^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$", *condition.Reason); match {
+				if match := regex.MatchString(*condition.Reason); match {
 					c.Reason = *condition.Reason
 					if condition.Message != nil {
 						c.Message = *condition.Message
