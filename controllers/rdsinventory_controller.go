@@ -73,7 +73,7 @@ const (
 
 	adoptedResourceCRDFile = "services.k8s.aws_adoptedresources.yaml"
 	fieldExportCRDFile     = "services.k8s.aws_fieldexports.yaml"
-	deploymentName         = "ack-rds-controller"
+	ackDeploymentName      = "ack-rds-controller"
 
 	adpotedDBInstanceLabelKey   = "rds.dbaas.redhat.com/adopted"
 	adpotedDBInstanceLabelValue = "true"
@@ -109,6 +109,7 @@ type RDSInventoryReconciler struct {
 	client.Client
 	Scheme              *runtime.Scheme
 	ACKInstallNamespace string
+	RDSCRDFilePath      string
 }
 
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories,verbs=get;list;watch;create;update;patch;delete
@@ -246,7 +247,7 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					return true
 				}
 
-				if e := r.stopRDSController(ctx, r.Client); e != nil {
+				if e := r.stopRDSController(ctx, r.Client, false); e != nil {
 					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUninstallError)
 					return true
 				}
@@ -692,7 +693,7 @@ func (r *RDSInventoryReconciler) readCRDFile(file string) (*apiextensionsv1.Cust
 
 func (r *RDSInventoryReconciler) waitForRDSController(ctx context.Context) (bool, error) {
 	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: ackDeploymentName}, deployment); err != nil {
 		return false, err
 	}
 	if deployment.Status.ReadyReplicas > 0 {
@@ -701,16 +702,20 @@ func (r *RDSInventoryReconciler) waitForRDSController(ctx context.Context) (bool
 	return false, nil
 }
 
-func (r *RDSInventoryReconciler) stopRDSController(ctx context.Context, cli client.Client) error {
+func (r *RDSInventoryReconciler) stopRDSController(ctx context.Context, cli client.Client, wait bool) error {
 	logger := log.FromContext(ctx)
 
 	deployment := &appsv1.Deployment{}
 	for {
-		if err := cli.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
+		if err := cli.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: ackDeploymentName}, deployment); err != nil {
 			if errors.IsNotFound(err) {
-				logger.Info("Wait for the installation of the RDS controller")
-				time.Sleep(25 * time.Second)
-				continue
+				if wait {
+					logger.Info("Wait for the installation of the RDS controller")
+					time.Sleep(25 * time.Second)
+					continue
+				} else {
+					return err
+				}
 			}
 			return err
 		}
@@ -727,7 +732,7 @@ func (r *RDSInventoryReconciler) stopRDSController(ctx context.Context, cli clie
 
 func (r *RDSInventoryReconciler) startRDSController(ctx context.Context) error {
 	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: deploymentName}, deployment); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.ACKInstallNamespace, Name: ackDeploymentName}, deployment); err != nil {
 		return err
 	}
 	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
@@ -782,14 +787,14 @@ func (r *RDSInventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
-	if err := r.stopRDSController(ctx, cli); err != nil {
+	if err := r.stopRDSController(ctx, cli, true); err != nil {
 		return err
 	}
 
-	if err := r.installCRD(ctx, cli, adoptedResourceCRDFile); err != nil {
+	if err := r.installCRD(ctx, cli, filepath.Join(r.RDSCRDFilePath, adoptedResourceCRDFile)); err != nil {
 		return err
 	}
-	if err := r.installCRD(ctx, cli, fieldExportCRDFile); err != nil {
+	if err := r.installCRD(ctx, cli, filepath.Join(r.RDSCRDFilePath, fieldExportCRDFile)); err != nil {
 		return err
 	}
 

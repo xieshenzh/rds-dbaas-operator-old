@@ -21,5 +21,9 @@ import (
 )
 
 var _ = Describe("RDSConnectionController", func() {
+	Context("when Inventory is not ready", func() {
+		Context("when Inventory doesn't exist", func() {
 
+		})
+	})
 })
