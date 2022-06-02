@@ -101,10 +101,7 @@ var _ = Describe("DBaaSProviderController", func() {
 				By("check if the CRDB DBaaSProvider is created")
 				Eventually(func() bool {
 					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(rdsProvider), rdsProvider)
-					if err != nil {
-						return false
-					}
-					return true
+					return err == nil
 				}, timeout).Should(BeTrue())
 
 				By("Validating DBaasProvider details")
