@@ -448,6 +448,33 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		waitForAdoptedResource := false
 		for i := range adoptedDBInstanceList.Items {
 			adoptedDBInstance := adoptedDBInstanceList.Items[i]
+
+			if adoptedDBInstance.Spec.MasterUsername == nil || adoptedDBInstance.Spec.DBName == nil {
+				if awsDBInstance, ok := awsDBInstanceMap[*adoptedDBInstance.Spec.DBInstanceIdentifier]; ok {
+					update := false
+					if adoptedDBInstance.Spec.MasterUsername == nil && awsDBInstance.MasterUsername != nil {
+						adoptedDBInstance.Spec.MasterUsername = pointer.String(*awsDBInstance.MasterUsername)
+						update = true
+					}
+					if adoptedDBInstance.Spec.DBName == nil && awsDBInstance.DBName != nil {
+						adoptedDBInstance.Spec.DBName = pointer.String(*awsDBInstance.DBName)
+						update = true
+					}
+					if update {
+						if e := r.Update(ctx, &adoptedDBInstance); e != nil {
+							if errors.IsConflict(e) {
+								logger.Info("Adopted DB Instance modified, retry reconciling")
+								returnUpdating()
+								return true
+							}
+							logger.Error(e, "Failed to update connection info of the adopted DB Instance", "DB Instance", adoptedDBInstance)
+							returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
+							return true
+						}
+					}
+				}
+			}
+
 			if adoptedDBInstance.Spec.MasterUserPassword == nil {
 				if adoptedDBInstance.Status.DBInstanceStatus != nil && *adoptedDBInstance.Status.DBInstanceStatus != "available" {
 					waitForAdoptedResource = true
@@ -477,32 +504,6 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					logger.Error(e, "Failed to update credentials of the adopted DB Instance", "DB Instance", adoptedDBInstance)
 					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
 					return true
-				}
-			}
-
-			if adoptedDBInstance.Spec.MasterUsername == nil || adoptedDBInstance.Spec.DBName == nil {
-				if awsDBInstance, ok := awsDBInstanceMap[*adoptedDBInstance.Spec.DBInstanceIdentifier]; ok {
-					update := false
-					if adoptedDBInstance.Spec.MasterUsername == nil && awsDBInstance.MasterUsername != nil {
-						adoptedDBInstance.Spec.MasterUsername = pointer.String(*awsDBInstance.MasterUsername)
-						update = true
-					}
-					if adoptedDBInstance.Spec.DBName == nil && awsDBInstance.DBName != nil {
-						adoptedDBInstance.Spec.DBName = pointer.String(*awsDBInstance.DBName)
-						update = true
-					}
-					if update {
-						if e := r.Update(ctx, &adoptedDBInstance); e != nil {
-							if errors.IsConflict(e) {
-								logger.Info("Adopted DB Instance modified, retry reconciling")
-								returnUpdating()
-								return true
-							}
-							logger.Error(e, "Failed to update connection info of the adopted DB Instance", "DB Instance", adoptedDBInstance)
-							returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
-							return true
-						}
-					}
 				}
 			}
 		}
