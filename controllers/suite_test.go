@@ -28,14 +28,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest/printer"
@@ -47,7 +46,7 @@ import (
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
 	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 	"github.com/xieshenzh/rds-dbaas-operator/controllers"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	controllersrdstest "github.com/xieshenzh/rds-dbaas-operator/controllers/rds/test"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -125,20 +124,6 @@ var _ = BeforeSuite(func() {
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
-		NewCache: cache.BuilderWithOptions(cache.Options{
-			SelectorsByObject: cache.SelectorsByObject{
-				&v1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{
-						dbaasv1alpha1.TypeLabelKey: dbaasv1alpha1.TypeLabelValue,
-					}),
-				},
-				&v1.ConfigMap{}: {
-					Label: labels.SelectorFromSet(labels.Set{
-						dbaasv1alpha1.TypeLabelKey: dbaasv1alpha1.TypeLabelValue,
-					}),
-				},
-			},
-		}),
 	})
 	Expect(err).ToNot(HaveOccurred())
 	Expect(mgr).ToNot(BeNil())
@@ -184,8 +169,7 @@ var _ = BeforeSuite(func() {
 			},
 		},
 	}
-	err = k8sClient.Create(ctx, rdsDeployment)
-	Expect(err).NotTo(HaveOccurred())
+	assertResourceCreation(rdsDeployment)()
 
 	providerReconciler := &controllers.DBaaSProviderReconciler{
 		Client:    mgr.GetClient(),
@@ -196,10 +180,12 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	inventoryReconciler := &controllers.RDSInventoryReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		ACKInstallNamespace: testNamespace,
-		RDSCRDFilePath:      filepath.Join("..", "rds", "config", "common", "bases"),
+		Client:                             mgr.GetClient(),
+		Scheme:                             mgr.GetScheme(),
+		GetDescribeDBInstancesPaginatorAPI: controllersrdstest.NewMockDescribeDBInstancesPaginator,
+		GetModifyDBInstanceAPI:             controllersrdstest.NewModifyDBInstance,
+		ACKInstallNamespace:                testNamespace,
+		RDSCRDFilePath:                     filepath.Join("..", "rds", "config", "common", "bases"),
 	}
 	err = inventoryReconciler.SetupWithManager(mgr)
 	Expect(err).ToNot(HaveOccurred())
@@ -217,6 +203,26 @@ var _ = BeforeSuite(func() {
 	}
 	err = instanceReconciler.SetupWithManager(mgr)
 	Expect(err).ToNot(HaveOccurred())
+
+	err = k8sClient.Get(ctx, client.ObjectKeyFromObject(rdsDeployment), rdsDeployment)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(*rdsDeployment.Spec.Replicas).Should(BeZero())
+
+	adoptedresourcesCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "adoptedresources.services.k8s.aws",
+		},
+	}
+	err = k8sClient.Get(ctx, client.ObjectKeyFromObject(adoptedresourcesCRD), adoptedresourcesCRD)
+	Expect(err).NotTo(HaveOccurred())
+
+	fieldexportsCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fieldexports.services.k8s.aws",
+		},
+	}
+	err = k8sClient.Get(ctx, client.ObjectKeyFromObject(fieldexportsCRD), fieldexportsCRD)
+	Expect(err).NotTo(HaveOccurred())
 
 	go func() {
 		defer GinkgoRecover()

@@ -46,6 +46,7 @@ import (
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
 	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
 	"github.com/xieshenzh/rds-dbaas-operator/controllers"
+	controllersrds "github.com/xieshenzh/rds-dbaas-operator/controllers/rds"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -141,9 +142,11 @@ func main() {
 	}
 
 	if err = (&controllers.RDSInventoryReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		ACKInstallNamespace: installNamespace,
+		Client:                             mgr.GetClient(),
+		Scheme:                             mgr.GetScheme(),
+		GetDescribeDBInstancesPaginatorAPI: controllersrds.NewDescribeDBInstancesPaginator,
+		GetModifyDBInstanceAPI:             controllersrds.NewModifyDBInstance,
+		ACKInstallNamespace:                installNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RDSInventory")
 		os.Exit(1)

@@ -46,12 +46,11 @@ import (
 	dbaasv1alpha1 "github.com/RHEcosystemAppEng/dbaas-operator/api/v1alpha1"
 	rdsv1alpha1 "github.com/aws-controllers-k8s/rds-controller/apis/v1alpha1"
 	ackv1alpha1 "github.com/aws-controllers-k8s/runtime/apis/core/v1alpha1"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstypesv2 "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	ophandler "github.com/operator-framework/operator-lib/handler"
 	rdsdbaasv1alpha1 "github.com/xieshenzh/rds-dbaas-operator/api/v1alpha1"
+	controllersrds "github.com/xieshenzh/rds-dbaas-operator/controllers/rds"
 )
 
 const (
@@ -107,9 +106,11 @@ const (
 // RDSInventoryReconciler reconciles a RDSInventory object
 type RDSInventoryReconciler struct {
 	client.Client
-	Scheme              *runtime.Scheme
-	ACKInstallNamespace string
-	RDSCRDFilePath      string
+	Scheme                             *runtime.Scheme
+	GetDescribeDBInstancesPaginatorAPI func(accessKey, secretKey, region string) controllersrds.DescribeDBInstancesPaginatorAPI
+	GetModifyDBInstanceAPI             func(accessKey, secretKey, region string) controllersrds.ModifyDBInstanceAPI
+	ACKInstallNamespace                string
+	RDSCRDFilePath                     string
 }
 
 //+kubebuilder:rbac:groups=dbaas.redhat.com,resources=rdsinventories,verbs=get;list;watch;create;update;patch;delete
@@ -368,13 +369,9 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	adoptDBInstances := func() bool {
 		var awsDBInstances []rdstypesv2.DBInstance
-		awsClient := rds.New(rds.Options{
-			Region:      region,
-			Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
-		})
-		paginator := rds.NewDescribeDBInstancesPaginator(awsClient, nil)
-		for paginator.HasMorePages() {
-			if output, e := paginator.NextPage(ctx); e != nil {
+		describeDBInstancesPaginator := r.GetDescribeDBInstancesPaginatorAPI(accessKey, secretKey, region)
+		for describeDBInstancesPaginator.HasMorePages() {
+			if output, e := describeDBInstancesPaginator.NextPage(ctx); e != nil {
 				logger.Error(e, "Failed to read DB Instances of the Inventory from AWS")
 				returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
 				return true
@@ -447,6 +444,7 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageGetInstancesError)
 			return true
 		}
+		modifyDBInstance := r.GetModifyDBInstanceAPI(accessKey, secretKey, region)
 		waitForAdoptedResource := false
 		for i := range adoptedDBInstanceList.Items {
 			adoptedDBInstance := adoptedDBInstanceList.Items[i]
@@ -465,7 +463,7 @@ func (r *RDSInventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					DBInstanceIdentifier: adoptedDBInstance.Spec.DBInstanceIdentifier,
 					MasterUserPassword:   pointer.String(string(password)),
 				}
-				if _, e := awsClient.ModifyDBInstance(ctx, input); e != nil {
+				if _, e := modifyDBInstance.ModifyDBInstance(ctx, input); e != nil {
 					logger.Error(e, "Failed to update credentials of the adopted DB Instance", "DB Instance", adoptedDBInstance)
 					returnError(e, inventoryStatusReasonBackendError, inventoryStatusMessageUpdateInstanceError)
 					return true
