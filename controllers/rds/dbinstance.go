@@ -71,5 +71,5 @@ func NewModifyDBInstance(accessKey, secretKey, region string) ModifyDBInstanceAP
 }
 
 func (m *sdkV2ModifyDBInstance) ModifyDBInstance(ctx context.Context, params *rds.ModifyDBInstanceInput, optFns ...func(*rds.Options)) (*rds.ModifyDBInstanceOutput, error) {
-	return m.ModifyDBInstance(ctx, params, optFns...)
+	return m.client.ModifyDBInstance(ctx, params, optFns...)
 }
